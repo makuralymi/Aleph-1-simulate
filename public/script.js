@@ -26,8 +26,21 @@ const CAMERA_DEFAULT_YAW = 0;
 const CAMERA_DEFAULT_PITCH = Math.PI / 2;
 
 //  贴图 
-const imgBH  = new Image(); imgBH.src  = "bh.png";
-const imgAMS = new Image(); imgAMS.src = "ams.png";
+const imgBH = new Image();
+const imgAMS = new Image();
+
+function bindImageWithFallback(image, primaryPath, fallbackPath) {
+  let triedFallback = false;
+  image.addEventListener("error", () => {
+    if (triedFallback) return;
+    triedFallback = true;
+    image.src = fallbackPath;
+  });
+  image.src = primaryPath;
+}
+
+bindImageWithFallback(imgBH, "/bh.png", "bh.png");
+bindImageWithFallback(imgAMS, "/ams.png", "ams.png");
 
 //  键盘 
 const keys = new Set();

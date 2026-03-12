@@ -1,16 +1,15 @@
-// ─── Cloudflare Worker + Durable Object: BlackHole Multiplayer ───
-
 const WORLD_BOUND = 100000;
-const TICK_INTERVAL = 50;           // 50ms server tick (~20Hz)
-const STAR_SPAWN_INTERVAL = 2000;   // spawn stars every 2s
-const STAR_MAX = 600;               // max stars in the world
-const STAR_BATCH = 15;              // stars per spawn batch
+const TICK_INTERVAL = 50;
+const STAR_MAX = 600;
+const STAR_BATCH = 15;
 const INITIAL_MASS = 1000;
-const SWALLOW_RATIO = 1.3;          // must be 1.3x mass to swallow another player
-const BROADCAST_INTERVAL = 50;      // broadcast state every 50ms
+const SWALLOW_RATIO = 1.3;
+const BROADCAST_INTERVAL = 50;
+const RECONNECT_GRACE_MS = 5 * 60 * 1000;
+const PERSIST_INTERVAL_MS = 1000;
+const STORAGE_KEY = "worldState";
 
 function resetHourUTC() {
-  // Beijing 04:00 = UTC 20:00 (previous day)
   return 20;
 }
 
@@ -30,24 +29,123 @@ function rand(min, max) {
   return Math.random() * (max - min) + min;
 }
 
+function clampNum(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(min, Math.min(max, number));
+}
+
+function normalizeSessionId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 128) return null;
+  return trimmed;
+}
+
+function sanitizePlayerName(value) {
+  const name = String(value || "").trim().slice(0, 20);
+  return name || "匿名黑洞";
+}
+
 function generateStar() {
-  const r = Math.random();
-  let type, mass, hue, sat, light;
-  if (r < 0.55) {
-    type = "asteroid"; mass = rand(5, 22); hue = rand(24, 45); sat = rand(45, 70); light = rand(50, 67);
-  } else if (r < 0.88) {
-    type = "planet"; mass = rand(22, 86); hue = rand(170, 235); sat = rand(55, 88); light = rand(56, 72);
+  const roll = Math.random();
+  let type;
+  let mass;
+  let hue;
+  let sat;
+  let light;
+
+  if (roll < 0.55) {
+    type = "asteroid";
+    mass = rand(5, 22);
+    hue = rand(24, 45);
+    sat = rand(45, 70);
+    light = rand(50, 67);
+  } else if (roll < 0.88) {
+    type = "planet";
+    mass = rand(22, 86);
+    hue = rand(170, 235);
+    sat = rand(55, 88);
+    light = rand(56, 72);
   } else {
-    type = "star"; mass = rand(86, 180); hue = rand(8, 58); sat = rand(78, 95); light = rand(68, 84);
+    type = "star";
+    mass = rand(86, 180);
+    hue = rand(8, 58);
+    sat = rand(78, 95);
+    light = rand(68, 84);
   }
+
   return {
     id: crypto.randomUUID(),
     x: randomInBound(),
     z: randomInBound(),
-    mass, type,
+    mass,
+    type,
     hue: Math.round(hue),
     sat: Math.round(sat),
     light: Math.round(light),
+  };
+}
+
+function createInitialStars() {
+  const stars = [];
+  for (let index = 0; index < STAR_MAX; index++) {
+    stars.push(generateStar());
+  }
+  return stars;
+}
+
+function createFreshPlayer(sessionId, name) {
+  return {
+    id: sessionId,
+    sessionId,
+    name,
+    x: randomInBound(),
+    z: randomInBound(),
+    mass: INITIAL_MASS,
+    eaten: 0,
+    vx: 0,
+    vz: 0,
+    alive: true,
+    connected: false,
+    disconnectedAt: null,
+    lastUpdate: Date.now(),
+  };
+}
+
+function serializePlayer(player) {
+  return {
+    id: player.id,
+    sessionId: player.sessionId,
+    name: player.name,
+    x: player.x,
+    z: player.z,
+    mass: player.mass,
+    eaten: player.eaten,
+    vx: player.vx,
+    vz: player.vz,
+    alive: player.alive,
+    connected: Boolean(player.connected),
+    disconnectedAt: player.disconnectedAt ?? null,
+    lastUpdate: player.lastUpdate ?? Date.now(),
+  };
+}
+
+function revivePlayer(rawPlayer) {
+  return {
+    id: rawPlayer.id,
+    sessionId: rawPlayer.sessionId || rawPlayer.id,
+    name: sanitizePlayerName(rawPlayer.name),
+    x: Number(rawPlayer.x) || 0,
+    z: Number(rawPlayer.z) || 0,
+    mass: Math.max(INITIAL_MASS, Number(rawPlayer.mass) || INITIAL_MASS),
+    eaten: Math.max(0, Math.floor(Number(rawPlayer.eaten) || 0)),
+    vx: Number(rawPlayer.vx) || 0,
+    vz: Number(rawPlayer.vz) || 0,
+    alive: rawPlayer.alive !== false,
+    connected: Boolean(rawPlayer.connected),
+    disconnectedAt: rawPlayer.disconnectedAt ?? null,
+    lastUpdate: Number(rawPlayer.lastUpdate) || Date.now(),
   };
 }
 
@@ -55,31 +153,96 @@ export class GameWorld {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.players = new Map();       // id -> { ws, name, x, z, mass, eaten, vx, vz, lastUpdate, alive }
+    this.players = new Map();
     this.stars = [];
-    this.seasonRanking = [];        // last season ranking
+    this.seasonRanking = [];
     this.nextReset = nextResetTime();
+    this.connections = new Map();
     this.tickTimer = null;
     this.broadcastTimer = null;
+    this.dirty = false;
+    this.lastPersistAt = 0;
+    this.flushPromise = null;
+    this.ready = this.state.blockConcurrencyWhile(async () => {
+      await this.loadState();
+    });
+  }
 
-    // Initialize stars
-    for (let i = 0; i < STAR_MAX; i++) {
-      this.stars.push(generateStar());
+  async loadState() {
+    const snapshot = await this.state.storage.get(STORAGE_KEY);
+    if (!snapshot || typeof snapshot !== "object") {
+      this.stars = createInitialStars();
+      this.nextReset = nextResetTime();
+      this.seasonRanking = [];
+      this.players.clear();
+      this.markDirty();
+      await this.flushState(true);
+      return;
+    }
+
+    this.stars = Array.isArray(snapshot.stars) ? snapshot.stars : createInitialStars();
+    this.nextReset = Number(snapshot.nextReset) || nextResetTime();
+    this.seasonRanking = Array.isArray(snapshot.seasonRanking) ? snapshot.seasonRanking : [];
+    this.players.clear();
+
+    if (Array.isArray(snapshot.players)) {
+      for (const rawPlayer of snapshot.players) {
+        const player = revivePlayer(rawPlayer);
+        player.connected = false;
+        this.players.set(player.sessionId, player);
+      }
     }
   }
 
+  markDirty() {
+    this.dirty = true;
+  }
+
+  buildSnapshot() {
+    return {
+      players: [...this.players.values()].map(serializePlayer),
+      stars: this.stars,
+      seasonRanking: this.seasonRanking,
+      nextReset: this.nextReset,
+      savedAt: Date.now(),
+    };
+  }
+
+  async flushState(force = false) {
+    if (!force && !this.dirty) return;
+    const now = Date.now();
+    if (!force && now - this.lastPersistAt < PERSIST_INTERVAL_MS) return;
+    if (this.flushPromise) {
+      if (force) await this.flushPromise;
+      return;
+    }
+
+    const snapshot = this.buildSnapshot();
+    this.dirty = false;
+    this.flushPromise = this.state.storage.put(STORAGE_KEY, snapshot)
+      .catch((error) => {
+        this.dirty = true;
+        throw error;
+      })
+      .finally(() => {
+        this.lastPersistAt = Date.now();
+        this.flushPromise = null;
+      });
+
+    await this.flushPromise;
+  }
+
   async fetch(request) {
+    await this.ready;
     const url = new URL(request.url);
 
     if (url.pathname === "/ws") {
       if (request.headers.get("Upgrade") !== "websocket") {
         return new Response("Expected WebSocket", { status: 426 });
       }
-
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.handleSession(server);
-
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -98,81 +261,73 @@ export class GameWorld {
 
   handleSession(ws) {
     ws.accept();
+    let sessionId = null;
 
-    const playerId = crypto.randomUUID();
-    let playerRegistered = false;
-
-    // Start tick if first player
-    if (this.players.size === 0) {
-      this.startTick();
-    }
-
-    ws.addEventListener("message", (event) => {
-      let msg;
+    ws.addEventListener("message", async (event) => {
+      let message;
       try {
-        msg = JSON.parse(event.data);
+        message = JSON.parse(event.data);
       } catch {
         return;
       }
 
-      if (msg.type === "join") {
-        const name = String(msg.name || "").slice(0, 20) || "匿名黑洞";
-        const player = {
-          ws,
-          id: playerId,
-          name,
-          x: randomInBound(),
-          z: randomInBound(),
-          mass: INITIAL_MASS,
-          eaten: 0,
-          vx: 0,
-          vz: 0,
-          lastUpdate: Date.now(),
-          alive: true,
-        };
-        this.players.set(playerId, player);
-        playerRegistered = true;
+      if (message.type === "join") {
+        const requestedSessionId = normalizeSessionId(message.sessionId);
+        const playerName = sanitizePlayerName(message.name);
+        const { player, restored } = this.createOrRestorePlayer(requestedSessionId, playerName);
+        sessionId = player.sessionId;
+        this.attachConnection(sessionId, ws);
+        player.name = playerName;
+        player.connected = true;
+        player.disconnectedAt = null;
+        player.lastUpdate = Date.now();
+        this.markDirty();
+        await this.flushState(true);
 
-        // Send init data
-        this.sendTo(ws, {
+        this.sendToSocket(ws, {
           type: "init",
-          id: playerId,
+          id: player.id,
+          sessionId: player.sessionId,
           x: player.x,
           z: player.z,
           mass: player.mass,
+          eaten: player.eaten,
           stars: this.stars,
-          players: this.getPlayersSnapshot(),
+          players: this.getPlayersSnapshot({ connectedOnly: true }),
           nextReset: this.nextReset,
           worldBound: WORLD_BOUND,
+          restored,
         });
 
-        // Broadcast new player
         this.broadcast({
-          type: "player_join",
-          id: playerId,
-          name,
+          type: restored ? "player_return" : "player_join",
+          id: player.id,
+          name: player.name,
           x: player.x,
           z: player.z,
           mass: player.mass,
-        }, playerId);
+          eaten: player.eaten,
+          alive: player.alive,
+        }, sessionId);
 
+        this.ensureLoops();
         return;
       }
 
-      if (!playerRegistered) return;
-      const player = this.players.get(playerId);
-      if (!player || !player.alive) return;
+      if (!sessionId) return;
+      const player = this.players.get(sessionId);
+      if (!player) return;
 
-      if (msg.type === "move") {
-        // Client sends velocity; server validates and applies
-        const vx = clampNum(msg.vx, -400, 400);
-        const vz = clampNum(msg.vz, -400, 400);
-        player.vx = vx;
-        player.vz = vz;
+      if (message.type === "move") {
+        if (!player.connected || !player.alive) return;
+        player.vx = clampNum(message.vx, -400, 400);
+        player.vz = clampNum(message.vz, -400, 400);
         player.lastUpdate = Date.now();
+        this.markDirty();
+        return;
       }
 
-      if (msg.type === "respawn") {
+      if (message.type === "respawn") {
         player.x = randomInBound();
         player.z = randomInBound();
         player.mass = INITIAL_MASS;
@@ -180,7 +335,10 @@ export class GameWorld {
         player.vx = 0;
         player.vz = 0;
         player.alive = true;
-        this.sendTo(ws, {
+        player.lastUpdate = Date.now();
+        this.markDirty();
+        await this.flushState(true);
+        this.sendToSocket(ws, {
           type: "respawn",
           x: player.x,
           z: player.z,
@@ -190,29 +348,71 @@ export class GameWorld {
     });
 
     ws.addEventListener("close", () => {
-      this.players.delete(playerId);
-      this.broadcast({ type: "player_leave", id: playerId });
-      if (this.players.size === 0) {
-        this.stopTick();
-      }
+      if (!sessionId) return;
+      void this.detachConnection(sessionId);
     });
 
     ws.addEventListener("error", () => {
-      this.players.delete(playerId);
-      this.broadcast({ type: "player_leave", id: playerId });
-      if (this.players.size === 0) {
-        this.stopTick();
-      }
+      if (!sessionId) return;
+      void this.detachConnection(sessionId);
     });
   }
 
-  startTick() {
-    if (this.tickTimer) return;
-    this.tickTimer = setInterval(() => this.tick(), TICK_INTERVAL);
-    this.broadcastTimer = setInterval(() => this.broadcastState(), BROADCAST_INTERVAL);
+  createOrRestorePlayer(requestedSessionId, playerName) {
+    const existing = requestedSessionId ? this.players.get(requestedSessionId) : null;
+    if (existing) {
+      existing.name = playerName;
+      return { player: existing, restored: true };
+    }
+
+    const sessionId = requestedSessionId || crypto.randomUUID();
+    const player = createFreshPlayer(sessionId, playerName);
+    this.players.set(sessionId, player);
+    return { player, restored: false };
   }
 
-  stopTick() {
+  attachConnection(sessionId, ws) {
+    const existingSocket = this.connections.get(sessionId);
+    if (existingSocket && existingSocket !== ws) {
+      try {
+        existingSocket.close(1012, "replaced");
+      } catch {
+        // ignore socket close failure
+      }
+    }
+    this.connections.set(sessionId, ws);
+  }
+
+  async detachConnection(sessionId) {
+    const player = this.players.get(sessionId);
+    this.connections.delete(sessionId);
+    if (!player) return;
+    player.connected = false;
+    player.vx = 0;
+    player.vz = 0;
+    player.disconnectedAt = Date.now();
+    player.lastUpdate = Date.now();
+    this.markDirty();
+    await this.flushState(true);
+    if (this.connections.size === 0) {
+      this.stopLoops();
+    }
+  }
+
+  ensureLoops() {
+    if (!this.tickTimer) {
+      this.tickTimer = setInterval(() => {
+        void this.tick();
+      }, TICK_INTERVAL);
+    }
+    if (!this.broadcastTimer) {
+      this.broadcastTimer = setInterval(() => {
+        this.broadcastState();
+      }, BROADCAST_INTERVAL);
+    }
+  }
+
+  stopLoops() {
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
@@ -223,227 +423,247 @@ export class GameWorld {
     }
   }
 
-  tick() {
+  getConnectedAlivePlayers() {
+    return [...this.players.values()].filter((player) => player.connected && player.alive);
+  }
+
+  cleanupDisconnectedPlayers(now) {
+    let changed = false;
+    for (const [playerSessionId, player] of this.players) {
+      if (player.connected || player.disconnectedAt == null) continue;
+      if (now - player.disconnectedAt < RECONNECT_GRACE_MS) continue;
+      this.players.delete(playerSessionId);
+      changed = true;
+    }
+    if (changed) {
+      this.markDirty();
+    }
+  }
+
+  async tick() {
+    await this.ready;
     const now = Date.now();
     const dt = TICK_INTERVAL / 1000;
+    this.cleanupDisconnectedPlayers(now);
 
-    // Check daily reset
     if (now >= this.nextReset) {
-      this.performDailyReset();
+      await this.performDailyReset();
       return;
     }
 
-    // Update player positions
-    for (const [id, p] of this.players) {
-      if (!p.alive) continue;
-      p.x += p.vx * dt;
-      p.z += p.vz * dt;
-      // Clamp to world bounds
-      p.x = Math.max(-WORLD_BOUND, Math.min(WORLD_BOUND, p.x));
-      p.z = Math.max(-WORLD_BOUND, Math.min(WORLD_BOUND, p.z));
+    const activePlayers = this.getConnectedAlivePlayers();
+    for (const player of activePlayers) {
+      player.x += player.vx * dt;
+      player.z += player.vz * dt;
+      player.x = Math.max(-WORLD_BOUND, Math.min(WORLD_BOUND, player.x));
+      player.z = Math.max(-WORLD_BOUND, Math.min(WORLD_BOUND, player.z));
+      player.lastUpdate = now;
     }
 
-    // PvP swallowing
-    const alivePlayers = [...this.players.values()].filter(p => p.alive);
-    for (let i = 0; i < alivePlayers.length; i++) {
-      for (let j = i + 1; j < alivePlayers.length; j++) {
-        const a = alivePlayers[i];
-        const b = alivePlayers[j];
-        const dx = a.x - b.x;
-        const dz = a.z - b.z;
-        const dist = Math.sqrt(dx * dx + dz * dz);
-        const aRadius = 4 + Math.pow(a.mass, 0.48) * 0.85;
-        const bRadius = 4 + Math.pow(b.mass, 0.48) * 0.85;
-        const swallowDist = Math.max(aRadius, bRadius) * 1.2;
+    for (let left = 0; left < activePlayers.length; left++) {
+      for (let right = left + 1; right < activePlayers.length; right++) {
+        const first = activePlayers[left];
+        const second = activePlayers[right];
+        const dx = first.x - second.x;
+        const dz = first.z - second.z;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+        const firstRadius = 4 + Math.pow(first.mass, 0.48) * 0.85;
+        const secondRadius = 4 + Math.pow(second.mass, 0.48) * 0.85;
+        const swallowDistance = Math.max(firstRadius, secondRadius) * 1.2;
 
-        if (dist < swallowDist) {
-          let winner, loser;
-          if (a.mass >= b.mass * SWALLOW_RATIO) {
-            winner = a; loser = b;
-          } else if (b.mass >= a.mass * SWALLOW_RATIO) {
-            winner = b; loser = a;
-          } else {
-            continue; // too close in mass, no swallow
-          }
+        if (distance >= swallowDistance) continue;
 
-          winner.mass += loser.mass * 0.8;
-          winner.eaten++;
-          loser.alive = false;
-          loser.mass = INITIAL_MASS;
-
-          // Notify loser
-          this.sendTo(loser.ws, {
-            type: "killed",
-            by: winner.name,
-            killerMass: winner.mass,
-          });
-
-          // Broadcast kill
-          this.broadcast({
-            type: "player_killed",
-            killerId: winner.id,
-            killerName: winner.name,
-            victimId: loser.id,
-            victimName: loser.name,
-          });
+        let winner = null;
+        let loser = null;
+        if (first.mass >= second.mass * SWALLOW_RATIO) {
+          winner = first;
+          loser = second;
+        } else if (second.mass >= first.mass * SWALLOW_RATIO) {
+          winner = second;
+          loser = first;
         }
+
+        if (!winner || !loser) continue;
+
+        winner.mass += loser.mass * 0.8;
+        winner.eaten += 1;
+        loser.alive = false;
+        loser.mass = INITIAL_MASS;
+        loser.vx = 0;
+        loser.vz = 0;
+        loser.lastUpdate = now;
+        this.markDirty();
+
+        this.sendToSession(loser.sessionId, {
+          type: "killed",
+          by: winner.name,
+          killerMass: winner.mass,
+        });
+
+        this.broadcast({
+          type: "player_killed",
+          killerId: winner.id,
+          killerName: winner.name,
+          victimId: loser.id,
+          victimName: loser.name,
+        });
       }
     }
 
-    // Star eating
-    for (const [id, p] of this.players) {
-      if (!p.alive) continue;
-      const horizon = (4 + Math.pow(p.mass, 0.48) * 0.85) * 1.05;
-      for (let i = this.stars.length - 1; i >= 0; i--) {
-        const s = this.stars[i];
-        const dx = p.x - s.x;
-        const dz = p.z - s.z;
-        const dist = Math.sqrt(dx * dx + dz * dz);
-        if (dist < horizon + 30) {
-          const gain = s.mass * (s.type === "star" ? 1.0 : s.type === "planet" ? 0.88 : 0.68);
-          p.mass += gain;
-          p.eaten++;
-          this.stars.splice(i, 1);
-        }
+    for (const player of activePlayers) {
+      if (!player.alive) continue;
+      const horizon = (4 + Math.pow(player.mass, 0.48) * 0.85) * 1.05;
+      for (let index = this.stars.length - 1; index >= 0; index--) {
+        const star = this.stars[index];
+        const dx = player.x - star.x;
+        const dz = player.z - star.z;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+        if (distance >= horizon + 30) continue;
+        const gain = star.mass * (star.type === "star" ? 1.0 : star.type === "planet" ? 0.88 : 0.68);
+        player.mass += gain;
+        player.eaten += 1;
+        this.stars.splice(index, 1);
+        this.markDirty();
       }
     }
 
-    // Spawn new stars
     if (this.stars.length < STAR_MAX) {
       const toSpawn = Math.min(STAR_BATCH, STAR_MAX - this.stars.length);
       const newStars = [];
-      for (let i = 0; i < toSpawn; i++) {
+      for (let index = 0; index < toSpawn; index++) {
         const star = generateStar();
         this.stars.push(star);
         newStars.push(star);
       }
       if (newStars.length > 0) {
+        this.markDirty();
         this.broadcast({ type: "stars_add", stars: newStars });
       }
     }
+
+    await this.flushState();
   }
 
   broadcastState() {
-    const playersData = [];
-    for (const [id, p] of this.players) {
-      playersData.push({
-        id, name: p.name,
-        x: Math.round(p.x),
-        z: Math.round(p.z),
-        mass: Math.round(p.mass * 10) / 10,
-        eaten: p.eaten,
-        alive: p.alive,
-      });
-    }
-
+    if (this.connections.size === 0) return;
+    const players = this.getPlayersSnapshot({ connectedOnly: true });
     const ranking = this.getCurrentRanking();
-
     this.broadcast({
       type: "state",
-      players: playersData,
+      players,
       starCount: this.stars.length,
       ranking: ranking.slice(0, 20),
       nextReset: this.nextReset,
     });
   }
 
+  getPlayersSnapshot(options = {}) {
+    const { connectedOnly = false } = options;
+    const snapshot = [];
+    for (const player of this.players.values()) {
+      if (connectedOnly && !player.connected) continue;
+      snapshot.push({
+        id: player.id,
+        name: player.name,
+        x: Math.round(player.x),
+        z: Math.round(player.z),
+        mass: Math.round(player.mass * 10) / 10,
+        eaten: player.eaten,
+        alive: player.alive,
+        connected: player.connected,
+      });
+    }
+    return snapshot;
+  }
+
   getCurrentRanking() {
     const ranking = [];
-    for (const [id, p] of this.players) {
-      ranking.push({ id, name: p.name, mass: Math.round(p.mass * 10) / 10, eaten: p.eaten, alive: p.alive });
+    for (const player of this.players.values()) {
+      ranking.push({
+        id: player.id,
+        name: player.name,
+        mass: Math.round(player.mass * 10) / 10,
+        eaten: player.eaten,
+        alive: player.alive,
+        connected: player.connected,
+      });
     }
-    ranking.sort((a, b) => b.mass - a.mass);
+    ranking.sort((left, right) => right.mass - left.mass);
     return ranking;
   }
 
-  performDailyReset() {
-    // Save final ranking
+  async performDailyReset() {
     this.seasonRanking = this.getCurrentRanking();
-
-    // Broadcast season end
     this.broadcast({
       type: "season_end",
       ranking: this.seasonRanking,
       nextReset: nextResetTime(),
     });
 
-    // Reset all players
-    for (const [id, p] of this.players) {
-      p.x = randomInBound();
-      p.z = randomInBound();
-      p.mass = INITIAL_MASS;
-      p.eaten = 0;
-      p.vx = 0;
-      p.vz = 0;
-      p.alive = true;
+    for (const player of this.players.values()) {
+      player.x = randomInBound();
+      player.z = randomInBound();
+      player.mass = INITIAL_MASS;
+      player.eaten = 0;
+      player.vx = 0;
+      player.vz = 0;
+      player.alive = true;
+      player.lastUpdate = Date.now();
     }
 
-    // Reset stars
-    this.stars = [];
-    for (let i = 0; i < STAR_MAX; i++) {
-      this.stars.push(generateStar());
-    }
-
+    this.stars = createInitialStars();
     this.nextReset = nextResetTime();
+    this.markDirty();
+    await this.flushState(true);
 
-    // Send new state to all
-    for (const [id, p] of this.players) {
-      this.sendTo(p.ws, {
+    for (const player of this.players.values()) {
+      if (!player.connected) continue;
+      this.sendToSession(player.sessionId, {
         type: "reset",
-        x: p.x,
-        z: p.z,
-        mass: p.mass,
+        x: player.x,
+        z: player.z,
+        mass: player.mass,
         stars: this.stars,
         nextReset: this.nextReset,
       });
     }
   }
 
-  getPlayersSnapshot() {
-    const result = [];
-    for (const [id, p] of this.players) {
-      result.push({
-        id, name: p.name,
-        x: Math.round(p.x),
-        z: Math.round(p.z),
-        mass: Math.round(p.mass * 10) / 10,
-        eaten: p.eaten,
-        alive: p.alive,
-      });
-    }
-    return result;
-  }
-
-  broadcast(msg, excludeId) {
-    const data = JSON.stringify(msg);
-    for (const [id, p] of this.players) {
-      if (id === excludeId) continue;
-      try { p.ws.send(data); } catch { /* ignore closed sockets */ }
+  broadcast(message, excludeSessionId) {
+    const payload = JSON.stringify(message);
+    for (const [currentSessionId, socket] of this.connections) {
+      if (currentSessionId === excludeSessionId) continue;
+      try {
+        socket.send(payload);
+      } catch {
+        // ignore closed socket
+      }
     }
   }
 
-  sendTo(ws, msg) {
-    try { ws.send(JSON.stringify(msg)); } catch { /* ignore */ }
+  sendToSession(sessionId, message) {
+    const socket = this.connections.get(sessionId);
+    if (!socket) return;
+    this.sendToSocket(socket, message);
   }
-}
 
-function clampNum(v, min, max) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(min, Math.min(max, n));
+  sendToSocket(socket, message) {
+    try {
+      socket.send(JSON.stringify(message));
+    } catch {
+      // ignore closed socket
+    }
+  }
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-
     if (url.pathname === "/ws" || url.pathname.startsWith("/api/")) {
       const id = env.GAME_WORLD.idFromName("global");
       const stub = env.GAME_WORLD.get(id);
       return stub.fetch(request);
     }
-
-    // Serve static assets from the assets binding
     return env.ASSETS.fetch(request);
   },
 };

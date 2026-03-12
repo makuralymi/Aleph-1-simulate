@@ -20,12 +20,15 @@
   const onlineCountEl = document.getElementById("onlineCount");
   const resetTimerEl = document.getElementById("resetTimer");
   const killFeed = document.getElementById("killFeed");
+  const SESSION_STORAGE_KEY = "blackhole-multiplayer-session-id";
+  const NAME_STORAGE_KEY = "blackhole-multiplayer-name";
 
   let ws = null;
   let connected = false;
   let nextResetTime = 0;
   let leaderboardCollapsed = false;
   let sendInterval = null;
+  let reconnectTimer = null;
 
   // ── 排行榜折叠 ──
   leaderboardToggle.addEventListener("click", () => {
@@ -109,11 +112,16 @@
   function connectWS(playerName) {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const url = proto + "//" + location.host + "/ws";
+    const savedSessionId = window.localStorage.getItem(SESSION_STORAGE_KEY);
     ws = new WebSocket(url);
 
     ws.addEventListener("open", () => {
       connected = true;
-      ws.send(JSON.stringify({ type: "join", name: playerName }));
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      ws.send(JSON.stringify({ type: "join", name: playerName, sessionId: savedSessionId }));
 
       // 定期发送移动信息
       sendInterval = setInterval(() => {
@@ -133,9 +141,14 @@
       switch (msg.type) {
         case "init":
           myPlayerId = msg.id;
+          if (msg.sessionId) {
+            window.localStorage.setItem(SESSION_STORAGE_KEY, msg.sessionId);
+          }
+          window.localStorage.setItem(NAME_STORAGE_KEY, playerName);
           blackHole.x = msg.x;
           blackHole.z = msg.z;
           blackHole.mass = msg.mass;
+          blackHole.eaten = msg.eaten || 0;
           nextResetTime = msg.nextReset;
 
           // Load server stars into local star array
@@ -155,8 +168,12 @@
             }
           }
 
-          // Start game loop
-          startGameDeferred(null);
+          if (!multiplayerStarted) {
+            startGameDeferred(null);
+          } else {
+            resetCameraView();
+            updateHud();
+          }
           break;
 
         case "state":
@@ -193,6 +210,7 @@
           break;
 
         case "player_join":
+        case "player_return":
           if (msg.id !== myPlayerId) {
             otherPlayers.set(msg.id, {
               id: msg.id, name: msg.name,
@@ -253,8 +271,7 @@
     ws.addEventListener("close", () => {
       connected = false;
       if (sendInterval) { clearInterval(sendInterval); sendInterval = null; }
-      // Try reconnect after 3s
-      setTimeout(() => {
+      reconnectTimer = setTimeout(() => {
         if (!connected) connectWS(playerName);
       }, 3000);
     });
@@ -310,10 +327,21 @@
 
   function startGame() {
     const name = nicknameInput.value.trim().slice(0, 20) || "匿名黑洞";
+    window.localStorage.setItem(NAME_STORAGE_KEY, name);
     welcomeOverlay.style.display = "none";
     connectWS(name);
   }
 
-  // 自动聚焦昵称输入框
-  nicknameInput.focus();
+  // 自动聚焦昵称输入框，若本地已有身份则直接尝试恢复
+  const storedName = window.localStorage.getItem(NAME_STORAGE_KEY);
+  const storedSessionId = window.localStorage.getItem(SESSION_STORAGE_KEY);
+  if (storedName) {
+    nicknameInput.value = storedName;
+  }
+  if (storedName && storedSessionId) {
+    welcomeOverlay.style.display = "none";
+    connectWS(storedName);
+  } else {
+    nicknameInput.focus();
+  }
 })();

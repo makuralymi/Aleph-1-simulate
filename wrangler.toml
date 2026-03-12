@@ -1,4 +1,4 @@
-name = "blackhole-game"
+name = "aleph-1-simulate"
 main = "src/worker.js"
 compatibility_date = "2024-12-01"
 

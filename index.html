@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>3D 阿列夫一模拟</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <div class="hud">
+      <h1>阿列夫一模拟</h1>
+      <div class="row">
+        <span>当前星区</span>
+        <strong id="sectorValue">1</strong>
+      </div>
+      <div class="row">
+        <span>目标质量</span>
+        <strong id="targetMassValue">1500</strong>
+      </div>
+      <div class="row">
+        <span>质量</span>
+        <strong id="massValue">1000</strong>
+      </div>
+      <div class="row">
+        <span>吞噬数量</span>
+        <strong id="eatCount">0</strong>
+      </div>
+      <div class="row">
+        <span>速度</span>
+        <strong id="speedValue">0</strong>
+      </div>
+      <div class="row">
+        <span>坐标</span>
+        <strong id="posValue">(0, 0)</strong>
+      </div>
+      <p class="status" id="goalStatus">目标：达到 1500 质量，解锁第 2 星区</p>
+      <p class="hint">WASD / 方向键：移动 | 鼠标按住：引导方向 | Alt + 拖动：环绕黑洞视角 | 滚轮：缩放 | R：重置视角 | Shift 加速</p>
+      <div class="hud-actions">
+        <button type="button" class="restart-btn" id="restartButton">重新开始</button>
+      </div>
+    </div>
+
+    <script src="./script.js"></script>
+  </body>
+</html>

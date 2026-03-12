@@ -1,0 +1,348 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: radial-gradient(circle at 50% 45%, #090e26 0%, #03040c 65%, #010107 100%);
+  color: #f1f4ff;
+}
+
+#game {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+}
+
+.hud {
+  position: fixed;
+  top: 16px;
+  left: 16px;
+  min-width: 220px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: rgba(6, 10, 24, 0.66);
+  border: 1px solid rgba(150, 180, 255, 0.25);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+
+.hud h1 {
+  margin: 0 0 10px;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  margin: 4px 0;
+  font-size: 14px;
+}
+
+.row strong {
+  color: #9ee7ff;
+}
+
+.hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #b8c8ff;
+  opacity: 0.9;
+}
+
+.hud-actions {
+  margin-top: 12px;
+}
+
+.restart-btn {
+  width: 100%;
+  border: 1px solid rgba(154, 192, 255, 0.38);
+  border-radius: 8px;
+  padding: 9px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: #eef5ff;
+  background: linear-gradient(180deg, rgba(73, 114, 218, 0.46), rgba(35, 61, 132, 0.55));
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.restart-btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(174, 213, 255, 0.52);
+  background: linear-gradient(180deg, rgba(88, 132, 245, 0.54), rgba(42, 72, 156, 0.64));
+}
+
+.restart-btn:active {
+  transform: translateY(0);
+}
+
+.status {
+  margin: 10px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  background: rgba(40, 73, 148, 0.25);
+  color: #d7e7ff;
+  border: 1px solid rgba(154, 192, 255, 0.35);
+}
+
+.status.win {
+  background: rgba(31, 120, 78, 0.26);
+  border-color: rgba(107, 235, 171, 0.45);
+  color: #c9ffe3;
+}
+
+/* ── 欢迎对话框 ── */
+.welcome-overlay,
+.death-overlay,
+.season-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 3, 12, 0.88);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+.welcome-dialog,
+.death-dialog,
+.season-dialog {
+  max-width: 520px;
+  width: 90%;
+  max-height: 85vh;
+  overflow-y: auto;
+  padding: 28px 32px;
+  border-radius: 16px;
+  background: rgba(10, 16, 38, 0.92);
+  border: 1px solid rgba(150, 180, 255, 0.3);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+}
+
+.welcome-dialog h1 {
+  margin: 0 0 16px;
+  font-size: 22px;
+  text-align: center;
+}
+
+.welcome-content h3 {
+  margin: 14px 0 6px;
+  font-size: 14px;
+  color: #9ee7ff;
+}
+
+.welcome-content p,
+.welcome-content li {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #c8d8f8;
+}
+
+.welcome-content ul {
+  padding-left: 18px;
+  margin: 4px 0 10px;
+}
+
+.welcome-input {
+  margin-top: 20px;
+  text-align: center;
+}
+
+.welcome-input label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: #b8c8ff;
+}
+
+.welcome-input input {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid rgba(150, 180, 255, 0.35);
+  border-radius: 8px;
+  background: rgba(20, 30, 60, 0.7);
+  color: #eef5ff;
+  font: inherit;
+  font-size: 15px;
+  outline: none;
+  margin-bottom: 14px;
+}
+
+.welcome-input input:focus {
+  border-color: rgba(100, 160, 255, 0.7);
+}
+
+.start-btn {
+  width: 100%;
+  border: 1px solid rgba(100, 180, 255, 0.5);
+  border-radius: 10px;
+  padding: 12px 16px;
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  color: #eef5ff;
+  background: linear-gradient(180deg, rgba(50, 100, 220, 0.6), rgba(30, 60, 150, 0.7));
+  cursor: pointer;
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+.start-btn:hover {
+  transform: translateY(-1px);
+  background: linear-gradient(180deg, rgba(65, 120, 240, 0.7), rgba(40, 75, 170, 0.8));
+}
+
+/* ── 死亡对话框 ── */
+.death-dialog {
+  text-align: center;
+}
+
+.death-dialog h2 {
+  margin: 0 0 12px;
+  font-size: 24px;
+}
+
+.death-dialog p {
+  color: #ffaaaa;
+  font-size: 14px;
+  margin-bottom: 18px;
+}
+
+/* ── 赛季结算 ── */
+.season-dialog {
+  text-align: center;
+}
+
+.season-dialog h2 {
+  margin: 0 0 16px;
+  font-size: 22px;
+}
+
+.season-ranking-list {
+  text-align: left;
+  margin-bottom: 16px;
+}
+
+.season-rank-item {
+  padding: 6px 10px;
+  margin: 4px 0;
+  border-radius: 6px;
+  background: rgba(40, 60, 120, 0.3);
+  font-size: 13px;
+  color: #d0e0ff;
+}
+
+.season-note {
+  font-size: 12px;
+  color: #88a8dd;
+  margin-bottom: 14px;
+}
+
+/* ── 排行榜（右上角） ── */
+.leaderboard {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  min-width: 230px;
+  max-width: 300px;
+  border-radius: 10px;
+  background: rgba(6, 10, 24, 0.72);
+  border: 1px solid rgba(150, 180, 255, 0.22);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+  overflow: hidden;
+}
+
+.leaderboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  user-select: none;
+  border-bottom: 1px solid rgba(150, 180, 255, 0.15);
+}
+
+.lb-arrow {
+  font-size: 11px;
+  color: #88a8dd;
+  transition: transform 200ms ease;
+}
+
+.leaderboard-body {
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+#leaderboardTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+#leaderboardTable th {
+  padding: 6px 8px;
+  text-align: left;
+  color: #7898cc;
+  font-weight: 500;
+  border-bottom: 1px solid rgba(100, 140, 220, 0.2);
+}
+
+#leaderboardTable td {
+  padding: 5px 8px;
+  color: #c0d4f0;
+}
+
+#leaderboardTable tr.lb-self td {
+  color: #9ee7ff;
+  font-weight: 600;
+}
+
+#leaderboardTable tr.lb-dead td {
+  opacity: 0.45;
+}
+
+/* ── 击杀通知 ── */
+.kill-feed {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: none;
+}
+
+.kill-notice {
+  padding: 6px 18px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  background: rgba(180, 40, 40, 0.55);
+  border: 1px solid rgba(255, 120, 120, 0.4);
+  color: #ffd4d4;
+  font-size: 13px;
+  animation: killFadeIn 300ms ease;
+  transition: opacity 500ms ease;
+}
+
+@keyframes killFadeIn {
+  from { opacity: 0; transform: translateY(-10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

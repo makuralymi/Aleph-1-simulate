@@ -11,4 +11,4 @@ class_name = "GameWorld"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["GameWorld"]
+new_sqlite_classes = ["GameWorld"]

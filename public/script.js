@@ -524,6 +524,20 @@ function spawnAbsorptionFlash(star) {
 function massGainFactor(type) { return type==="star"?1.0:type==="planet"?0.88:0.68; }
 
 function integrateStars(dt) {
+  if (multiplayerStarted) {
+    // Multiplayer uses server-authoritative mass gain and star consumption.
+    for (let i = stars.length - 1; i >= 0; i--) {
+      stars[i].rot += stars[i].rotSpeed * dt;
+    }
+    for (let i = absorptionFlashes.length - 1; i >= 0; i--) {
+      const f = absorptionFlashes[i];
+      f.timer -= dt;
+      f.alpha = Math.max(0, f.timer / f.maxTimer);
+      if (f.timer <= 0) absorptionFlashes.splice(i, 1);
+    }
+    return;
+  }
+
   ensureActiveChunks();
   const horizon = eventHorizon(), tidal = tidalRadius(), G = gravitationalConstant();
 

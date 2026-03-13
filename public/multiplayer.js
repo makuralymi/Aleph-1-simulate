@@ -5,8 +5,12 @@
   "use strict";
 
   const welcomeOverlay = document.getElementById("welcomeOverlay");
+  const accountInput = document.getElementById("accountInput");
+  const passwordInput = document.getElementById("passwordInput");
   const nicknameInput = document.getElementById("nicknameInput");
-  const startGameBtn = document.getElementById("startGameBtn");
+  const welcomeError = document.getElementById("welcomeError");
+  const loginBtn = document.getElementById("loginBtn");
+  const registerBtn = document.getElementById("registerBtn");
   const deathOverlay = document.getElementById("deathOverlay");
   const deathInfo = document.getElementById("deathInfo");
   const respawnBtn = document.getElementById("respawnBtn");
@@ -20,15 +24,41 @@
   const onlineCountEl = document.getElementById("onlineCount");
   const resetTimerEl = document.getElementById("resetTimer");
   const killFeed = document.getElementById("killFeed");
+  const hudToggle = document.getElementById("hudToggle");
+  const hudBody = document.getElementById("hudBody");
+  const hudArrow = document.getElementById("hudArrow");
   const SESSION_STORAGE_KEY = "blackhole-multiplayer-session-id";
   const NAME_STORAGE_KEY = "blackhole-multiplayer-name";
+  const ACCOUNT_STORAGE_KEY = "blackhole-account-name";
+  const AUTH_TOKEN_STORAGE_KEY = "blackhole-auth-token";
+  const HUD_COLLAPSED_KEY = "blackhole-hud-collapsed";
 
   let ws = null;
   let connected = false;
   let nextResetTime = 0;
   let leaderboardCollapsed = false;
+  let hudCollapsed = false;
   let sendInterval = null;
   let reconnectTimer = null;
+  let authToken = null;
+  let currentPlayerName = "匿名黑洞";
+
+  function setWelcomeError(message) {
+    if (!welcomeError) return;
+    if (!message) {
+      welcomeError.style.display = "none";
+      welcomeError.textContent = "";
+      return;
+    }
+    welcomeError.textContent = message;
+    welcomeError.style.display = "block";
+  }
+
+  function applyHudCollapsedState() {
+    if (!hudBody || !hudArrow) return;
+    hudBody.style.display = hudCollapsed ? "none" : "block";
+    hudArrow.textContent = hudCollapsed ? "▶" : "▼";
+  }
 
   // ── 排行榜折叠 ──
   leaderboardToggle.addEventListener("click", () => {
@@ -36,6 +66,17 @@
     leaderboardBody.style.display = leaderboardCollapsed ? "none" : "block";
     leaderboardArrow.textContent = leaderboardCollapsed ? "▶" : "▼";
   });
+
+  if (hudToggle) {
+    const savedHudCollapsed = window.localStorage.getItem(HUD_COLLAPSED_KEY);
+    hudCollapsed = savedHudCollapsed === "1";
+    applyHudCollapsedState();
+    hudToggle.addEventListener("click", () => {
+      hudCollapsed = !hudCollapsed;
+      applyHudCollapsedState();
+      window.localStorage.setItem(HUD_COLLAPSED_KEY, hudCollapsed ? "1" : "0");
+    });
+  }
 
   // ── 重置倒计时 ──
   function updateResetTimer() {
@@ -108,12 +149,39 @@
     seasonOverlay.style.display = "none";
   });
 
+  function clearAuthState() {
+    authToken = null;
+    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+  }
+
+  async function authRequest(path, payload) {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+    if (!response.ok || !data?.ok) {
+      const errorMessage = data?.error || "请求失败，请稍后再试";
+      throw new Error(errorMessage);
+    }
+    return data;
+  }
+
   // ── WebSocket 连接 ──
-  function connectWS(playerName) {
+  function connectWS(playerName, token) {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const url = proto + "//" + location.host + "/ws";
     const savedSessionId = window.localStorage.getItem(SESSION_STORAGE_KEY);
     ws = new WebSocket(url);
+    currentPlayerName = playerName;
+    authToken = token;
 
     ws.addEventListener("open", () => {
       connected = true;
@@ -121,7 +189,7 @@
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      ws.send(JSON.stringify({ type: "join", name: playerName, sessionId: savedSessionId }));
+      ws.send(JSON.stringify({ type: "join", name: playerName, token, sessionId: savedSessionId }));
 
       // 定期发送移动信息
       sendInterval = setInterval(() => {
@@ -144,6 +212,8 @@
           if (msg.sessionId) {
             window.localStorage.setItem(SESSION_STORAGE_KEY, msg.sessionId);
           }
+          welcomeOverlay.style.display = "none";
+          setWelcomeError("");
           window.localStorage.setItem(NAME_STORAGE_KEY, playerName);
           blackHole.x = msg.x;
           blackHole.z = msg.z;
@@ -176,6 +246,14 @@
           }
           break;
 
+        case "auth_required":
+          clearAuthState();
+          if (sendInterval) { clearInterval(sendInterval); sendInterval = null; }
+          connected = false;
+          welcomeOverlay.style.display = "flex";
+          setWelcomeError(msg.reason || "登录状态失效，请重新登录");
+          break;
+
         case "state":
           if (msg.players) {
             const serverIds = new Set();
@@ -205,6 +283,17 @@
           if (msg.stars) {
             for (const s of msg.stars) {
               stars.push(serverStarToLocal(s));
+            }
+          }
+          break;
+
+        case "stars_remove":
+          if (Array.isArray(msg.starIds) && msg.starIds.length > 0) {
+            const removed = new Set(msg.starIds);
+            for (let index = stars.length - 1; index >= 0; index--) {
+              if (removed.has(stars[index].id)) {
+                stars.splice(index, 1);
+              }
             }
           }
           break;
@@ -271,8 +360,9 @@
     ws.addEventListener("close", () => {
       connected = false;
       if (sendInterval) { clearInterval(sendInterval); sendInterval = null; }
+      if (!authToken) return;
       reconnectTimer = setTimeout(() => {
-        if (!connected) connectWS(playerName);
+        if (!connected) connectWS(currentPlayerName, authToken);
       }, 3000);
     });
 
@@ -286,6 +376,7 @@
     const density = s.type === "asteroid" ? 3.0 : s.type === "planet" ? 1.7 : 0.4;
     const radius = Math.cbrt((3 * s.mass) / (4 * Math.PI * density));
     return {
+      id: s.id,
       x: s.x,
       y: blackHole.y + (Math.random() - 0.5) * 180,
       z: s.z,
@@ -320,28 +411,77 @@
   };
 
   // ── 开始游戏 ──
-  startGameBtn.addEventListener("click", startGame);
-  nicknameInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") startGame();
+  loginBtn.addEventListener("click", () => {
+    void submitAuth("login");
+  });
+  registerBtn.addEventListener("click", () => {
+    void submitAuth("register");
   });
 
-  function startGame() {
-    const name = nicknameInput.value.trim().slice(0, 20) || "匿名黑洞";
-    window.localStorage.setItem(NAME_STORAGE_KEY, name);
-    welcomeOverlay.style.display = "none";
-    connectWS(name);
+  function setAuthSubmitting(submitting) {
+    loginBtn.disabled = submitting;
+    registerBtn.disabled = submitting;
+  }
+
+  async function submitAuth(mode) {
+    const username = accountInput.value.trim();
+    const password = passwordInput.value;
+    const nickname = nicknameInput.value.trim().slice(0, 20);
+
+    if (!username) {
+      setWelcomeError("请输入账号");
+      accountInput.focus();
+      return;
+    }
+    if (!password) {
+      setWelcomeError("请输入密码");
+      passwordInput.focus();
+      return;
+    }
+
+    setAuthSubmitting(true);
+    setWelcomeError("");
+    try {
+      const path = mode === "register" ? "/api/auth/register" : "/api/auth/login";
+      const payload = mode === "register"
+        ? { username, password, nickname: nickname || username }
+        : { username, password };
+      const result = await authRequest(path, payload);
+      const playerName = (nickname || result.nickname || result.username || username).slice(0, 20) || "匿名黑洞";
+      authToken = result.token;
+      window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, result.token);
+      window.localStorage.setItem(ACCOUNT_STORAGE_KEY, username);
+      window.localStorage.setItem(NAME_STORAGE_KEY, playerName);
+      connectWS(playerName, result.token);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "登录失败，请稍后再试";
+      setWelcomeError(message);
+    } finally {
+      setAuthSubmitting(false);
+    }
   }
 
   // 自动聚焦昵称输入框，若本地已有身份则直接尝试恢复
+  const storedToken = window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+  const storedAccount = window.localStorage.getItem(ACCOUNT_STORAGE_KEY);
   const storedName = window.localStorage.getItem(NAME_STORAGE_KEY);
   const storedSessionId = window.localStorage.getItem(SESSION_STORAGE_KEY);
+  if (storedAccount) {
+    accountInput.value = storedAccount;
+  }
   if (storedName) {
     nicknameInput.value = storedName;
   }
-  if (storedName && storedSessionId) {
+  if (storedToken && storedName && storedSessionId) {
     welcomeOverlay.style.display = "none";
-    connectWS(storedName);
+    connectWS(storedName, storedToken);
   } else {
-    nicknameInput.focus();
+    accountInput.focus();
   }
+
+  passwordInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      void submitAuth("login");
+    }
+  });
 })();

@@ -8,6 +8,12 @@ const BROADCAST_INTERVAL = 50;
 const RECONNECT_GRACE_MS = 5 * 60 * 1000;
 const PERSIST_INTERVAL_MS = 1000;
 const STORAGE_KEY = "worldState";
+const ACCOUNTS_KEY = "accounts";
+const ACCOUNT_NAME_MIN_LEN = 3;
+const ACCOUNT_NAME_MAX_LEN = 20;
+const PASSWORD_MIN_LEN = 6;
+const PASSWORD_MAX_LEN = 64;
+const textEncoder = new TextEncoder();
 
 function resetHourUTC() {
   return 20;
@@ -45,6 +51,37 @@ function normalizeSessionId(value) {
 function sanitizePlayerName(value) {
   const name = String(value || "").trim().slice(0, 20);
   return name || "匿名黑洞";
+}
+
+function normalizeAccountName(value) {
+  const name = String(value || "").trim();
+  if (name.length < ACCOUNT_NAME_MIN_LEN || name.length > ACCOUNT_NAME_MAX_LEN) return null;
+  if (!/^[a-zA-Z0-9_\u4e00-\u9fa5]+$/.test(name)) return null;
+  return name;
+}
+
+function normalizePassword(value) {
+  const password = String(value || "");
+  if (password.length < PASSWORD_MIN_LEN || password.length > PASSWORD_MAX_LEN) return null;
+  return password;
+}
+
+function normalizeToken(value) {
+  if (typeof value !== "string") return null;
+  const token = value.trim();
+  if (!token || token.length > 160) return null;
+  return token;
+}
+
+async function hashPassword(password, salt) {
+  const payload = textEncoder.encode(`${salt}:${password}`);
+  const buffer = await crypto.subtle.digest("SHA-256", payload);
+  const bytes = new Uint8Array(buffer);
+  let result = "";
+  for (const byte of bytes) {
+    result += byte.toString(16).padStart(2, "0");
+  }
+  return result;
 }
 
 function generateStar() {
@@ -232,9 +269,149 @@ export class GameWorld {
     await this.flushPromise;
   }
 
+  jsonResponse(payload, status = 200) {
+    return new Response(JSON.stringify(payload), {
+      status,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  }
+
+  async readJsonBody(request) {
+    try {
+      const data = await request.json();
+      if (!data || typeof data !== "object") return null;
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  async loadAccounts() {
+    const stored = await this.state.storage.get(ACCOUNTS_KEY);
+    return Array.isArray(stored) ? stored : [];
+  }
+
+  async saveAccounts(accounts) {
+    await this.state.storage.put(ACCOUNTS_KEY, accounts);
+  }
+
+  async findAccountByToken(token) {
+    const accountToken = normalizeToken(token);
+    if (!accountToken) return null;
+    const accounts = await this.loadAccounts();
+    return accounts.find((account) => account.token === accountToken) || null;
+  }
+
+  async registerAccount(payload) {
+    const username = normalizeAccountName(payload?.username);
+    const password = normalizePassword(payload?.password);
+    const nickname = sanitizePlayerName(payload?.nickname || payload?.username);
+
+    if (!username) {
+      return this.jsonResponse({ ok: false, error: "账号格式不正确（3-20位，支持中英文、数字、下划线）" }, 400);
+    }
+    if (!password) {
+      return this.jsonResponse({ ok: false, error: "密码长度需为 6-64 位" }, 400);
+    }
+
+    const usernameKey = username.toLowerCase();
+    const accounts = await this.loadAccounts();
+    const exists = accounts.some((account) => account.usernameKey === usernameKey);
+    if (exists) {
+      return this.jsonResponse({ ok: false, error: "账号已存在" }, 409);
+    }
+
+    const salt = crypto.randomUUID();
+    const passwordHash = await hashPassword(password, salt);
+    const token = crypto.randomUUID();
+    const now = Date.now();
+
+    accounts.push({
+      username,
+      usernameKey,
+      nickname,
+      salt,
+      passwordHash,
+      token,
+      createdAt: now,
+      updatedAt: now,
+      lastLoginAt: now,
+    });
+
+    await this.saveAccounts(accounts);
+
+    return this.jsonResponse({
+      ok: true,
+      token,
+      username,
+      nickname,
+    });
+  }
+
+  async loginAccount(payload) {
+    const username = normalizeAccountName(payload?.username);
+    const password = normalizePassword(payload?.password);
+    if (!username || !password) {
+      return this.jsonResponse({ ok: false, error: "账号或密码不正确" }, 400);
+    }
+
+    const usernameKey = username.toLowerCase();
+    const accounts = await this.loadAccounts();
+    const accountIndex = accounts.findIndex((account) => account.usernameKey === usernameKey);
+    if (accountIndex === -1) {
+      return this.jsonResponse({ ok: false, error: "账号或密码不正确" }, 401);
+    }
+
+    const account = accounts[accountIndex];
+    const passwordHash = await hashPassword(password, account.salt);
+    if (passwordHash !== account.passwordHash) {
+      return this.jsonResponse({ ok: false, error: "账号或密码不正确" }, 401);
+    }
+
+    const token = crypto.randomUUID();
+    account.token = token;
+    account.lastLoginAt = Date.now();
+    account.updatedAt = Date.now();
+    accounts[accountIndex] = account;
+    await this.saveAccounts(accounts);
+
+    return this.jsonResponse({
+      ok: true,
+      token,
+      username: account.username,
+      nickname: sanitizePlayerName(account.nickname || account.username),
+    });
+  }
+
   async fetch(request) {
     await this.ready;
     const url = new URL(request.url);
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        },
+      });
+    }
+
+    if (url.pathname === "/api/auth/register" && request.method === "POST") {
+      const payload = await this.readJsonBody(request);
+      if (!payload) return this.jsonResponse({ ok: false, error: "请求体无效" }, 400);
+      return this.registerAccount(payload);
+    }
+
+    if (url.pathname === "/api/auth/login" && request.method === "POST") {
+      const payload = await this.readJsonBody(request);
+      if (!payload) return this.jsonResponse({ ok: false, error: "请求体无效" }, 400);
+      return this.loginAccount(payload);
+    }
 
     if (url.pathname === "/ws") {
       if (request.headers.get("Upgrade") !== "websocket") {
@@ -247,12 +424,10 @@ export class GameWorld {
     }
 
     if (url.pathname === "/api/ranking") {
-      return new Response(JSON.stringify({
+      return this.jsonResponse({
         current: this.getCurrentRanking(),
         lastSeason: this.seasonRanking,
         nextReset: this.nextReset,
-      }), {
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
       });
     }
 
@@ -272,8 +447,19 @@ export class GameWorld {
       }
 
       if (message.type === "join") {
+        const account = await this.findAccountByToken(message.token);
+        if (!account) {
+          this.sendToSocket(ws, { type: "auth_required", reason: "登录已失效，请重新登录" });
+          try {
+            ws.close(1008, "auth required");
+          } catch {
+            // ignore close failure
+          }
+          return;
+        }
+
         const requestedSessionId = normalizeSessionId(message.sessionId);
-        const playerName = sanitizePlayerName(message.name);
+        const playerName = sanitizePlayerName(message.name || account.nickname || account.username);
         const { player, restored } = this.createOrRestorePlayer(requestedSessionId, playerName);
         sessionId = player.sessionId;
         this.attachConnection(sessionId, ws);
@@ -513,6 +699,7 @@ export class GameWorld {
     for (const player of activePlayers) {
       if (!player.alive) continue;
       const horizon = (4 + Math.pow(player.mass, 0.48) * 0.85) * 1.05;
+      const removedStarIds = [];
       for (let index = this.stars.length - 1; index >= 0; index--) {
         const star = this.stars[index];
         const dx = player.x - star.x;
@@ -522,8 +709,13 @@ export class GameWorld {
         const gain = star.mass * (star.type === "star" ? 1.0 : star.type === "planet" ? 0.88 : 0.68);
         player.mass += gain;
         player.eaten += 1;
+        removedStarIds.push(star.id);
         this.stars.splice(index, 1);
         this.markDirty();
+      }
+
+      if (removedStarIds.length > 0) {
+        this.broadcast({ type: "stars_remove", starIds: removedStarIds });
       }
     }
 

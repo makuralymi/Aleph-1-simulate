@@ -34,10 +34,29 @@ body {
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
 }
 
+.hud-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 .hud h1 {
   margin: 0 0 10px;
   font-size: 17px;
   font-weight: 700;
+}
+
+.hud-arrow {
+  font-size: 11px;
+  color: #88a8dd;
+  transition: transform 200ms ease;
+}
+
+.hud-body {
+  overflow: hidden;
 }
 
 .row {
@@ -184,6 +203,28 @@ body {
   border-color: rgba(100, 160, 255, 0.7);
 }
 
+.welcome-error {
+  display: none;
+  margin: -6px 0 10px;
+  min-height: 18px;
+  font-size: 12px;
+  color: #ff9fa8;
+  text-align: left;
+}
+
+.auth-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.auth-actions .start-btn {
+  width: 50%;
+}
+
+.secondary-btn {
+  background: linear-gradient(180deg, rgba(40, 70, 140, 0.55), rgba(22, 40, 94, 0.7));
+}
+
 .start-btn {
   width: 100%;
   border: 1px solid rgba(100, 180, 255, 0.5);
@@ -274,6 +315,7 @@ body {
   cursor: pointer;
   font-size: 14px;
   font-weight: 600;
+  -webkit-user-select: none;
   user-select: none;
   border-bottom: 1px solid rgba(150, 180, 255, 0.15);
 }

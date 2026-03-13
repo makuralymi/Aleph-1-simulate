@@ -154,7 +154,7 @@
 
     <!-- 管理员传送面板 -->
     <div id="adminPanel" class="admin-panel" style="display:none;">
-      <div class="admin-header">管理员传送</div>
+      <div class="admin-header">管理员工具</div>
       <div class="admin-body">
         <div class="admin-row">
           <label for="teleportX">X</label>
@@ -165,6 +165,16 @@
           <input type="number" id="teleportZ" placeholder="0" />
         </div>
         <button type="button" id="teleportBtn" class="admin-teleport-btn">传送</button>
+        <div class="admin-row" style="margin-top:10px;">
+          <label for="adminMass">质量</label>
+          <input type="number" id="adminMass" placeholder="1000" min="100" />
+        </div>
+        <button type="button" id="adminSetMassBtn" class="admin-teleport-btn">设置质量</button>
+        <div class="admin-row" style="margin-top:10px;">
+          <label for="adminNickname">昵称</label>
+          <input type="text" id="adminNickname" placeholder="昵称" maxlength="20" />
+        </div>
+        <button type="button" id="adminSetNameBtn" class="admin-teleport-btn">设置昵称</button>
       </div>
     </div>
 

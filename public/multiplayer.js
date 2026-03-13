@@ -32,6 +32,10 @@
   const teleportXInput = document.getElementById("teleportX");
   const teleportZInput = document.getElementById("teleportZ");
   const teleportBtn = document.getElementById("teleportBtn");
+  const adminMassInput = document.getElementById("adminMass");
+  const adminSetMassBtn = document.getElementById("adminSetMassBtn");
+  const adminNicknameInput = document.getElementById("adminNickname");
+  const adminSetNameBtn = document.getElementById("adminSetNameBtn");
   const SESSION_STORAGE_KEY = "blackhole-multiplayer-session-id";
   const NAME_STORAGE_KEY = "blackhole-multiplayer-name";
   const ACCOUNT_STORAGE_KEY = "blackhole-account-name";
@@ -399,6 +403,18 @@
           blackHole.vz = 0;
           resetCameraView();
           break;
+
+        case "mass_updated":
+          blackHole.mass = msg.mass;
+          blackHole.eaten = msg.eaten ?? blackHole.eaten;
+          if (typeof updateHud === "function") updateHud();
+          break;
+
+        case "name_updated":
+          currentPlayerName = msg.name;
+          window.localStorage.setItem(NAME_STORAGE_KEY, msg.name);
+          if (typeof updateHud === "function") updateHud();
+          break;
       }
     });
 
@@ -520,6 +536,26 @@
       const x = parseFloat(teleportXInput.value) || 0;
       const z = parseFloat(teleportZInput.value) || 0;
       ws.send(JSON.stringify({ type: "teleport", x, z }));
+    });
+  }
+
+  // ── 管理员设置质量 ──
+  if (adminSetMassBtn) {
+    adminSetMassBtn.addEventListener("click", () => {
+      if (!ws || !connected || !isAdmin) return;
+      const mass = parseFloat(adminMassInput.value);
+      if (!Number.isFinite(mass) || mass < 100) return;
+      ws.send(JSON.stringify({ type: "admin_set_mass", mass }));
+    });
+  }
+
+  // ── 管理员设置昵称 ──
+  if (adminSetNameBtn) {
+    adminSetNameBtn.addEventListener("click", () => {
+      if (!ws || !connected || !isAdmin) return;
+      const name = adminNicknameInput.value.trim().slice(0, 20);
+      if (!name) return;
+      ws.send(JSON.stringify({ type: "admin_set_name", name }));
     });
   }
 

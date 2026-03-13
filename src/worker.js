@@ -199,6 +199,7 @@ function serializePlayer(player) {
     connected: Boolean(player.connected),
     disconnectedAt: player.disconnectedAt ?? null,
     lastUpdate: player.lastUpdate ?? Date.now(),
+    accountKey: player.accountKey ?? null,
   };
 }
 
@@ -217,6 +218,7 @@ function revivePlayer(rawPlayer) {
     connected: Boolean(rawPlayer.connected),
     disconnectedAt: rawPlayer.disconnectedAt ?? null,
     lastUpdate: Number(rawPlayer.lastUpdate) || Date.now(),
+    accountKey: rawPlayer.accountKey ?? null,
   };
 }
 
@@ -364,6 +366,18 @@ export class GameWorld {
   async primeNextSeasonWorld() {
     const nextWorldStars = generateDistributedStars();
     await this.state.storage.put(PREGENERATED_STARS_KEY, nextWorldStars);
+  }
+
+  async savePlayerPositionToAccount(player) {
+    if (!player.accountKey) return;
+    const accounts = await this.loadAccounts();
+    const idx = accounts.findIndex((a) => a.usernameKey === player.accountKey);
+    if (idx === -1) return;
+    accounts[idx].lastX = player.x;
+    accounts[idx].lastZ = player.z;
+    accounts[idx].lastMass = player.mass;
+    accounts[idx].lastEaten = player.eaten;
+    await this.saveAccounts(accounts);
   }
 
   async findAccountByToken(token) {
@@ -594,12 +608,22 @@ export class GameWorld {
         const isAdmin = account.isAdmin === true || account.usernameKey === ADMIN_USERNAME.toLowerCase();
         const { player, restored } = this.createOrRestorePlayer(requestedSessionId, playerName);
         sessionId = player.sessionId;
+        player.accountKey = account.usernameKey;
         player.isAdmin = isAdmin;
         this.attachConnection(sessionId, ws);
         player.name = playerName;
         player.connected = true;
         player.disconnectedAt = null;
         player.lastUpdate = Date.now();
+
+        // Restore position from account if this is a new/expired session but account has a saved position
+        if (!restored && account.lastX != null && Number.isFinite(Number(account.lastX))) {
+          player.x = Number(account.lastX);
+          player.z = Number(account.lastZ) || 0;
+          player.mass = Math.max(INITIAL_MASS, Number(account.lastMass) || INITIAL_MASS);
+          player.eaten = Math.max(0, Math.floor(Number(account.lastEaten) || 0));
+        }
+
         this.markDirty();
         await this.flushState(true);
 
@@ -686,6 +710,45 @@ export class GameWorld {
         return;
       }
 
+      if (message.type === "admin_set_mass") {
+        if (!player.connected || !player.alive || !player.isAdmin) return;
+        const newMass = clampNum(Number(message.mass), 100, 1e9);
+        if (!Number.isFinite(newMass)) return;
+        player.mass = newMass;
+        player.lastUpdate = Date.now();
+        this.markDirty();
+        this.sendToSocket(ws, {
+          type: "mass_updated",
+          mass: player.mass,
+          eaten: player.eaten,
+        });
+        return;
+      }
+
+      if (message.type === "admin_set_name") {
+        if (!player.connected || !player.isAdmin) return;
+        const newName = sanitizePlayerName(message.name);
+        if (!newName) return;
+        player.name = newName;
+        player.lastUpdate = Date.now();
+        this.markDirty();
+        this.sendToSocket(ws, {
+          type: "name_updated",
+          name: player.name,
+        });
+        this.broadcast({
+          type: "player_return",
+          id: player.id,
+          name: player.name,
+          x: player.x,
+          z: player.z,
+          mass: player.mass,
+          eaten: player.eaten,
+          alive: player.alive,
+        }, sessionId);
+        return;
+      }
+
       if (message.type === "eat_star") {
         if (!player.connected || !player.alive) return;
         const starId = typeof message.starId === "string" ? message.starId : null;
@@ -750,6 +813,7 @@ export class GameWorld {
     player.disconnectedAt = Date.now();
     player.lastUpdate = Date.now();
     this.markDirty();
+    await this.savePlayerPositionToAccount(player);
     await this.flushState(true);
     if (this.connections.size === 0) {
       this.stopLoops();
@@ -1107,6 +1171,22 @@ export class GameWorld {
       player.vz = 0;
       player.alive = true;
       player.lastUpdate = Date.now();
+    }
+
+    // Clear saved positions in accounts so players start fresh each season
+    const accounts = await this.loadAccounts();
+    let accountsChanged = false;
+    for (const account of accounts) {
+      if (account.lastX != null) {
+        account.lastX = null;
+        account.lastZ = null;
+        account.lastMass = null;
+        account.lastEaten = null;
+        accountsChanged = true;
+      }
+    }
+    if (accountsChanged) {
+      await this.saveAccounts(accounts);
     }
 
     const preGeneratedStars = await this.consumePreGeneratedStars();

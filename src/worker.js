@@ -4,10 +4,17 @@ const STAR_MAX = 600;
 const STAR_BATCH = 15;
 const INITIAL_MASS = 1000;
 const SWALLOW_RATIO = 1.3;
-const BROADCAST_INTERVAL = 50;
+const BROADCAST_INTERVAL = 80;
 const RECONNECT_GRACE_MS = 5 * 60 * 1000;
 const PERSIST_INTERVAL_MS = 1000;
+const RANKING_CACHE_MS = 500;
+const STAR_CELL_SIZE = 2200;
+const STAR_SPAWN_RADIUS_MIN = 600;   // 新星最小生成半径（单位同世界坐标）
+const STAR_SPAWN_RADIUS_MAX = 7000;  // 新星最大生成半径
+const STAR_RECYCLE_RADIUS = 14000;   // 超出该半径的星体将被回收（所有玩家均不在附近时）
+const STAR_RECYCLE_INTERVAL = 100;   // 每 N tick 执行一次回收（100*50ms=5秒）
 const STORAGE_KEY = "worldState";
+const PREGENERATED_STARS_KEY = "preGeneratedStars";
 const ACCOUNTS_KEY = "accounts";
 const ACCOUNT_NAME_MIN_LEN = 3;
 const ACCOUNT_NAME_MAX_LEN = 20;
@@ -33,6 +40,12 @@ function randomInBound() {
 
 function rand(min, max) {
   return Math.random() * (max - min) + min;
+}
+
+function starCellKey(x, z) {
+  const cellX = Math.floor(x / STAR_CELL_SIZE);
+  const cellZ = Math.floor(z / STAR_CELL_SIZE);
+  return `${cellX},${cellZ}`;
 }
 
 function clampNum(value, min, max) {
@@ -124,12 +137,31 @@ function generateStar() {
   };
 }
 
-function createInitialStars() {
+function generateDistributedStars() {
   const stars = [];
+  const span = WORLD_BOUND * 1.8;
+  const edge = -WORLD_BOUND * 0.9;
+  const cellsPerAxis = Math.ceil(Math.sqrt(STAR_MAX));
+  const step = span / cellsPerAxis;
+
   for (let index = 0; index < STAR_MAX; index++) {
-    stars.push(generateStar());
+    const base = generateStar();
+    const gridX = index % cellsPerAxis;
+    const gridZ = Math.floor(index / cellsPerAxis);
+    const jitterX = rand(-step * 0.35, step * 0.35);
+    const jitterZ = rand(-step * 0.35, step * 0.35);
+    stars.push({
+      ...base,
+      x: edge + gridX * step + step * 0.5 + jitterX,
+      z: edge + gridZ * step + step * 0.5 + jitterZ,
+    });
   }
+
   return stars;
+}
+
+function createInitialStars() {
+  return generateDistributedStars();
 }
 
 function createFreshPlayer(sessionId, name) {
@@ -200,6 +232,9 @@ export class GameWorld {
     this.dirty = false;
     this.lastPersistAt = 0;
     this.flushPromise = null;
+    this.cachedRanking = [];
+    this.cachedRankingAt = 0;
+    this.tickCount = 0;
     this.ready = this.state.blockConcurrencyWhile(async () => {
       await this.loadState();
     });
@@ -214,6 +249,8 @@ export class GameWorld {
       this.players.clear();
       this.markDirty();
       await this.flushState(true);
+      await this.scheduleNextResetAlarm();
+      await this.primeNextSeasonWorld();
       return;
     }
 
@@ -229,10 +266,13 @@ export class GameWorld {
         this.players.set(player.sessionId, player);
       }
     }
+
+    await this.scheduleNextResetAlarm();
   }
 
   markDirty() {
     this.dirty = true;
+    this.cachedRankingAt = 0;
   }
 
   buildSnapshot() {
@@ -296,6 +336,32 @@ export class GameWorld {
 
   async saveAccounts(accounts) {
     await this.state.storage.put(ACCOUNTS_KEY, accounts);
+  }
+
+  async scheduleNextResetAlarm() {
+    try {
+      await this.state.storage.setAlarm(this.nextReset);
+    } catch {
+      // ignore alarm setup failure
+    }
+  }
+
+  async loadPreGeneratedStars() {
+    const stored = await this.state.storage.get(PREGENERATED_STARS_KEY);
+    if (!Array.isArray(stored) || stored.length < STAR_MAX) return null;
+    return stored;
+  }
+
+  async consumePreGeneratedStars() {
+    const stars = await this.loadPreGeneratedStars();
+    if (!stars) return null;
+    await this.state.storage.delete(PREGENERATED_STARS_KEY);
+    return stars;
+  }
+
+  async primeNextSeasonWorld() {
+    const nextWorldStars = generateDistributedStars();
+    await this.state.storage.put(PREGENERATED_STARS_KEY, nextWorldStars);
   }
 
   async findAccountByToken(token) {
@@ -386,6 +452,16 @@ export class GameWorld {
     });
   }
 
+  async alarm() {
+    await this.ready;
+    const now = Date.now();
+    if (now >= this.nextReset) {
+      await this.performDailyReset();
+      return;
+    }
+    await this.scheduleNextResetAlarm();
+  }
+
   async fetch(request) {
     await this.ready;
     const url = new URL(request.url);
@@ -427,6 +503,7 @@ export class GameWorld {
       return this.jsonResponse({
         current: this.getCurrentRanking(),
         lastSeason: this.seasonRanking,
+        yesterdayRanking: this.seasonRanking,
         nextReset: this.nextReset,
       });
     }
@@ -480,6 +557,8 @@ export class GameWorld {
           eaten: player.eaten,
           stars: this.stars,
           players: this.getPlayersSnapshot({ connectedOnly: true }),
+          ranking: this.getCurrentRanking(),
+          lastSeason: this.seasonRanking.slice(0, 20),
           nextReset: this.nextReset,
           worldBound: WORLD_BOUND,
           restored,
@@ -530,6 +609,23 @@ export class GameWorld {
           z: player.z,
           mass: player.mass,
         });
+      }
+
+      if (message.type === "eat_star") {
+        if (!player.connected || !player.alive) return;
+        const starId = typeof message.starId === "string" ? message.starId : null;
+        if (!starId) return;
+        const starIndex = this.stars.findIndex((s) => s.id === starId);
+        if (starIndex === -1) return; // 已被消耗（防重复）
+        const star = this.stars[starIndex];
+        const gain = star.mass * (star.type === "star" ? 1.0 : star.type === "planet" ? 0.88 : 0.68);
+        player.mass += gain;
+        player.eaten += 1;
+        player.lastUpdate = Date.now();
+        this.stars.splice(starIndex, 1);
+        this.markDirty();
+        this.broadcast({ type: "stars_remove", starIds: [starId] });
+        return;
       }
     });
 
@@ -613,6 +709,18 @@ export class GameWorld {
     return [...this.players.values()].filter((player) => player.connected && player.alive);
   }
 
+  spawnStarNearPlayers(players) {
+    const star = generateStar();
+    if (players.length > 0) {
+      const p = players[Math.floor(Math.random() * players.length)];
+      const angle = Math.random() * Math.PI * 2;
+      const dist = rand(STAR_SPAWN_RADIUS_MIN, STAR_SPAWN_RADIUS_MAX);
+      star.x = Math.max(-WORLD_BOUND, Math.min(WORLD_BOUND, p.x + Math.cos(angle) * dist));
+      star.z = Math.max(-WORLD_BOUND, Math.min(WORLD_BOUND, p.z + Math.sin(angle) * dist));
+    }
+    return star;
+  }
+
   cleanupDisconnectedPlayers(now) {
     let changed = false;
     for (const [playerSessionId, player] of this.players) {
@@ -628,6 +736,7 @@ export class GameWorld {
 
   async tick() {
     await this.ready;
+    this.tickCount++;
     const now = Date.now();
     const dt = TICK_INTERVAL / 1000;
     this.cleanupDisconnectedPlayers(now);
@@ -696,22 +805,48 @@ export class GameWorld {
       }
     }
 
+    const starCells = new Map();
+    for (let index = 0; index < this.stars.length; index++) {
+      const star = this.stars[index];
+      const key = starCellKey(star.x, star.z);
+      const bucket = starCells.get(key);
+      if (bucket) {
+        bucket.push(index);
+      } else {
+        starCells.set(key, [index]);
+      }
+    }
+
+    const consumedIndices = new Set();
     for (const player of activePlayers) {
       if (!player.alive) continue;
       const horizon = (4 + Math.pow(player.mass, 0.48) * 0.85) * 1.05;
+      const scanRadius = horizon + 30;
+      const cellRadius = Math.max(1, Math.ceil(scanRadius / STAR_CELL_SIZE));
+      const centerCellX = Math.floor(player.x / STAR_CELL_SIZE);
+      const centerCellZ = Math.floor(player.z / STAR_CELL_SIZE);
       const removedStarIds = [];
-      for (let index = this.stars.length - 1; index >= 0; index--) {
-        const star = this.stars[index];
-        const dx = player.x - star.x;
-        const dz = player.z - star.z;
-        const distance = Math.sqrt(dx * dx + dz * dz);
-        if (distance >= horizon + 30) continue;
-        const gain = star.mass * (star.type === "star" ? 1.0 : star.type === "planet" ? 0.88 : 0.68);
-        player.mass += gain;
-        player.eaten += 1;
-        removedStarIds.push(star.id);
-        this.stars.splice(index, 1);
-        this.markDirty();
+
+      for (let offsetX = -cellRadius; offsetX <= cellRadius; offsetX++) {
+        for (let offsetZ = -cellRadius; offsetZ <= cellRadius; offsetZ++) {
+          const bucket = starCells.get(`${centerCellX + offsetX},${centerCellZ + offsetZ}`);
+          if (!bucket) continue;
+          for (const starIndex of bucket) {
+            if (consumedIndices.has(starIndex)) continue;
+            const star = this.stars[starIndex];
+            if (!star) continue;
+            const dx = player.x - star.x;
+            const dz = player.z - star.z;
+            const distance = Math.sqrt(dx * dx + dz * dz);
+            if (distance >= scanRadius) continue;
+            const gain = star.mass * (star.type === "star" ? 1.0 : star.type === "planet" ? 0.88 : 0.68);
+            player.mass += gain;
+            player.eaten += 1;
+            consumedIndices.add(starIndex);
+            removedStarIds.push(star.id);
+            this.markDirty();
+          }
+        }
       }
 
       if (removedStarIds.length > 0) {
@@ -719,11 +854,33 @@ export class GameWorld {
       }
     }
 
+    if (consumedIndices.size > 0) {
+      this.stars = this.stars.filter((_, index) => !consumedIndices.has(index));
+    }
+
+    // 周期性回收远离所有玩家的星体，为附近补充腾出空间
+    if (activePlayers.length > 0 && this.tickCount % STAR_RECYCLE_INTERVAL === 0) {
+      const rr2 = STAR_RECYCLE_RADIUS * STAR_RECYCLE_RADIUS;
+      const toRemoveIds = [];
+      this.stars = this.stars.filter((star) => {
+        for (const p of activePlayers) {
+          const dx = star.x - p.x, dz = star.z - p.z;
+          if (dx * dx + dz * dz < rr2) return true; // 在某玩家附近，保留
+        }
+        toRemoveIds.push(star.id);
+        return false; // 所有玩家都很远，回收
+      });
+      if (toRemoveIds.length > 0) {
+        this.broadcast({ type: "stars_remove", starIds: toRemoveIds });
+        this.markDirty();
+      }
+    }
+
     if (this.stars.length < STAR_MAX) {
       const toSpawn = Math.min(STAR_BATCH, STAR_MAX - this.stars.length);
       const newStars = [];
       for (let index = 0; index < toSpawn; index++) {
-        const star = generateStar();
+        const star = this.spawnStarNearPlayers(activePlayers);
         this.stars.push(star);
         newStars.push(star);
       }
@@ -745,6 +902,7 @@ export class GameWorld {
       players,
       starCount: this.stars.length,
       ranking: ranking.slice(0, 20),
+      lastSeason: this.seasonRanking.slice(0, 20),
       nextReset: this.nextReset,
     });
   }
@@ -768,7 +926,12 @@ export class GameWorld {
     return snapshot;
   }
 
-  getCurrentRanking() {
+  getCurrentRanking(force = false) {
+    const now = Date.now();
+    if (!force && now - this.cachedRankingAt < RANKING_CACHE_MS && this.cachedRanking.length > 0) {
+      return this.cachedRanking;
+    }
+
     const ranking = [];
     for (const player of this.players.values()) {
       ranking.push({
@@ -781,15 +944,18 @@ export class GameWorld {
       });
     }
     ranking.sort((left, right) => right.mass - left.mass);
+    this.cachedRanking = ranking;
+    this.cachedRankingAt = now;
     return ranking;
   }
 
   async performDailyReset() {
-    this.seasonRanking = this.getCurrentRanking();
+    this.seasonRanking = this.getCurrentRanking(true);
+    const upcomingReset = nextResetTime();
     this.broadcast({
       type: "season_end",
       ranking: this.seasonRanking,
-      nextReset: nextResetTime(),
+      nextReset: upcomingReset,
     });
 
     for (const player of this.players.values()) {
@@ -803,10 +969,13 @@ export class GameWorld {
       player.lastUpdate = Date.now();
     }
 
-    this.stars = createInitialStars();
-    this.nextReset = nextResetTime();
+    const preGeneratedStars = await this.consumePreGeneratedStars();
+    this.stars = preGeneratedStars || createInitialStars();
+    this.nextReset = upcomingReset;
     this.markDirty();
     await this.flushState(true);
+    await this.scheduleNextResetAlarm();
+    void this.primeNextSeasonWorld();
 
     for (const player of this.players.values()) {
       if (!player.connected) continue;
@@ -816,6 +985,7 @@ export class GameWorld {
         z: player.z,
         mass: player.mass,
         stars: this.stars,
+        lastSeason: this.seasonRanking.slice(0, 20),
         nextReset: this.nextReset,
       });
     }

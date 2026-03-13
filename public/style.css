@@ -331,10 +331,24 @@ body {
   overflow-y: auto;
 }
 
+.leaderboard-section-title {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  color: #85a3d6;
+  letter-spacing: 0.08em;
+}
+
 #leaderboardTable {
   width: 100%;
   border-collapse: collapse;
   font-size: 12px;
+}
+
+#yesterdayLeaderboardTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 8px;
 }
 
 #leaderboardTable th {
@@ -345,7 +359,20 @@ body {
   border-bottom: 1px solid rgba(100, 140, 220, 0.2);
 }
 
+#yesterdayLeaderboardTable th {
+  padding: 6px 8px;
+  text-align: left;
+  color: #7898cc;
+  font-weight: 500;
+  border-bottom: 1px solid rgba(100, 140, 220, 0.2);
+}
+
 #leaderboardTable td {
+  padding: 5px 8px;
+  color: #c0d4f0;
+}
+
+#yesterdayLeaderboardTable td {
   padding: 5px 8px;
   color: #c0d4f0;
 }

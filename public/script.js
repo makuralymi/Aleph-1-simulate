@@ -20,7 +20,7 @@ const SAVE_INTERVAL_MS = 1200;
 const CAMERA_PITCH_MIN = 0.2;
 const CAMERA_PITCH_MAX = Math.PI - 0.2;
 const CAMERA_DISTANCE_MIN = 320;
-const CAMERA_DISTANCE_MAX = 1800;
+const CAMERA_DISTANCE_MAX = 3600;
 const CAMERA_DEFAULT_DISTANCE = 800;
 const CAMERA_DEFAULT_YAW = 0;
 const CAMERA_DEFAULT_PITCH = Math.PI / 2;
@@ -52,7 +52,7 @@ const SIM = {
   focus:             720,
   drag:              0.982,
   chunkSize:         1700,
-  activeChunkRadius: 2,
+  activeChunkRadius: 3,
   starsPerChunkBase: 14,
   maxSpeed:          400,
 };
@@ -525,9 +525,47 @@ function massGainFactor(type) { return type==="star"?1.0:type==="planet"?0.88:0.
 
 function integrateStars(dt) {
   if (multiplayerStarted) {
-    // Multiplayer uses server-authoritative mass gain and star consumption.
+    // 多人模式：本地运行引力物理（视觉效果），吞噬时通知服务端更新质量
+    const horizon = eventHorizon(), tidal = tidalRadius(), G = gravitationalConstant();
     for (let i = stars.length - 1; i >= 0; i--) {
-      stars[i].rot += stars[i].rotSpeed * dt;
+      const s = stars[i];
+      const dx = blackHole.x - s.x, dy = blackHole.y - s.y, dz = blackHole.z - s.z;
+      const rawDist2 = dx*dx + dy*dy + dz*dz;
+      const rawDist  = Math.sqrt(rawDist2);
+      const soft2    = SIM.softening * SIM.softening;
+      const softDist2 = rawDist2 + soft2;
+      let accel = (G * blackHole.mass) / softDist2;
+      if (rawDist < tidal) accel *= 1 + 4.5 * Math.pow(1 - rawDist / tidal, 1.6);
+      const inv = 1 / Math.max(rawDist, 0.001);
+      s.vx += dx * inv * accel * dt;
+      s.vy += dy * inv * accel * dt;
+      s.vz += dz * inv * accel * dt;
+      const decay = rawDist < tidal ? 0.9980 : 0.9995;
+      s.vx *= decay; s.vy *= 0.9985; s.vz *= decay;
+      s.x += s.vx*dt; s.y += s.vy*dt; s.z += s.vz*dt;
+      s.rot += s.rotSpeed * dt;
+      // 吞噬：立即更新本地质量 + 效果 + 通知服务端
+      if (rawDist < horizon) {
+        const gain = s.mass * massGainFactor(s.type);
+        blackHole.mass += gain;
+        blackHole.eaten++;
+        lastEatMass = gain;
+        const pulsePct = gain / blackHole.mass;
+        bhScalePulse = Math.min(bhScalePulse + pulsePct * 6.0, 1.85);
+        const ir = Math.min(0.012, s.mass / blackHole.mass);
+        blackHole.vx += (s.vx - blackHole.vx) * ir;
+        blackHole.vy += (s.vy - blackHole.vy) * ir;
+        blackHole.vz += (s.vz - blackHole.vz) * ir;
+        spawnAbsorptionFlash(s);
+        if (typeof window.onStarEaten === "function" && s.id) window.onStarEaten(s.id, s.mass, s.type);
+        stars.splice(i, 1); continue;
+      }
+      // 回收飘离过远的星体，等待服务端在玩家附近补充新星
+      if (Math.abs(s.x - blackHole.x) > 14000 ||
+          Math.abs(s.z - blackHole.z) > 14000 ||
+          Math.abs(s.y - blackHole.y) > 600) {
+        stars.splice(i, 1);
+      }
     }
     for (let i = absorptionFlashes.length - 1; i >= 0; i--) {
       const f = absorptionFlashes[i];
@@ -1339,6 +1377,9 @@ function startGameDeferred(savedState) {
 
   resize();
   createWorld(savedState);
+  // 多人模式：清除 createWorld 生成的本地区块星体，只使用服务端下发的星体
+  stars.length = 0;
+  activeChunks.clear();
 
   // 恢复服务器状态
   blackHole.x = serverX;

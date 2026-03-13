@@ -21,6 +21,7 @@
   const leaderboardBody = document.getElementById("leaderboardBody");
   const leaderboardArrow = document.getElementById("leaderboardArrow");
   const leaderboardTbody = document.getElementById("leaderboardTbody");
+  const yesterdayLeaderboardTbody = document.getElementById("yesterdayLeaderboardTbody");
   const onlineCountEl = document.getElementById("onlineCount");
   const resetTimerEl = document.getElementById("resetTimer");
   const killFeed = document.getElementById("killFeed");
@@ -125,6 +126,22 @@
     }
   }
 
+  function updateYesterdayLeaderboard(ranking) {
+    if (!yesterdayLeaderboardTbody) return;
+    yesterdayLeaderboardTbody.innerHTML = "";
+    const list = Array.isArray(ranking) ? ranking : [];
+    for (let i = 0; i < Math.min(list.length, 10); i++) {
+      const r = list[i];
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td>" + (i + 1) + "</td>" +
+        "<td>" + escapeHtml(r.name || "匿名") + "</td>" +
+        "<td>" + Math.round(Number(r.mass) || 0) + "</td>" +
+        "<td>" + (Number(r.eaten) || 0) + "</td>";
+      yesterdayLeaderboardTbody.appendChild(tr);
+    }
+  }
+
   function escapeHtml(text) {
     const div = document.createElement("div");
     div.textContent = text;
@@ -220,6 +237,8 @@
           blackHole.mass = msg.mass;
           blackHole.eaten = msg.eaten || 0;
           nextResetTime = msg.nextReset;
+          if (msg.ranking) updateLeaderboard(msg.ranking);
+          if (msg.lastSeason) updateYesterdayLeaderboard(msg.lastSeason);
 
           // Load server stars into local star array
           stars.length = 0;
@@ -276,6 +295,7 @@
             onlineCountEl.textContent = msg.players.length;
           }
           if (msg.ranking) updateLeaderboard(msg.ranking);
+          if (msg.lastSeason) updateYesterdayLeaderboard(msg.lastSeason);
           if (msg.nextReset) nextResetTime = msg.nextReset;
           break;
 
@@ -335,6 +355,7 @@
 
         case "season_end":
           showSeasonEnd(msg.ranking);
+          updateYesterdayLeaderboard(msg.ranking);
           nextResetTime = msg.nextReset;
           break;
 
@@ -351,6 +372,7 @@
               stars.push(serverStarToLocal(s));
             }
           }
+          if (msg.lastSeason) updateYesterdayLeaderboard(msg.lastSeason);
           nextResetTime = msg.nextReset;
           resetCameraView();
           break;
@@ -402,6 +424,13 @@
       ws.send(JSON.stringify({ type: "respawn" }));
     }
   });
+
+  // ── 吞噬星体回调（供 script.js 调用）──
+  window.onStarEaten = function (starId, mass, type) {
+    if (ws && connected && starId) {
+      ws.send(JSON.stringify({ type: "eat_star", starId, mass, starType: type }));
+    }
+  };
 
   // ── 重新开始回调（供 script.js 调用）──
   window.onGameRestart = function () {

@@ -1324,45 +1324,113 @@ document.addEventListener("visibilitychange", () => {
 
 // ── 多人联机：渲染其他玩家 ──
 function drawOtherPlayers() {
+  const { ry, edgeOn } = getDiskViewFactors();
+  const nowMs = performance.now();
+
   for (const [id, op] of otherPlayers) {
     if (id === myPlayerId || !op.alive) continue;
     const p = project(op.x, blackHole.y, op.z);
     if (!p || p.x < -120 || p.x > width + 120 || p.y < -120 || p.y > height + 120) continue;
     const opRadius = 4 + Math.pow(op.mass, 0.48) * 0.85;
     const PR = opRadius * p.scale;
-    // Glow
-    const glow = ctx.createRadialGradient(p.x, p.y, PR * 0.5, p.x, p.y, PR * 4);
-    glow.addColorStop(0, "rgba(255,80,80,0.35)");
-    glow.addColorStop(0.4, "rgba(255,40,40,0.12)");
-    glow.addColorStop(1, "rgba(200,20,20,0)");
+    const isOffline = op.connected === false;
+    const baseAlpha = isOffline ? 0.45 : 1.0;
+
+    // 外层辉光
+    const glowColor0 = isOffline ? "rgba(80,120,255,0.28)" : "rgba(255,80,80,0.35)";
+    const glowColor1 = isOffline ? "rgba(40,80,255,0.10)" : "rgba(255,40,40,0.12)";
+    const glow = ctx.createRadialGradient(p.x, p.y, PR * 0.5, p.x, p.y, PR * 5.5);
+    glow.addColorStop(0, glowColor0);
+    glow.addColorStop(0.4, glowColor1);
+    glow.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.globalAlpha = baseAlpha;
     ctx.fillStyle = glow;
-    ctx.beginPath(); ctx.arc(p.x, p.y, PR * 4, 0, Math.PI * 2); ctx.fill();
-    // Body
+    ctx.beginPath(); ctx.arc(p.x, p.y, PR * 5.5, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // 吸积盘后半圈（在黑洞本体之前绘制）
+    drawAccretionDisk(p.x, p.y, PR, nowMs);
+    drawEinsteinRingArcs(p.x, p.y, PR, edgeOn, nowMs);
+
+    // 透镜晕光（红色调区分）
+    const lensGlow = ctx.createRadialGradient(p.x, p.y, PR * 0.95, p.x, p.y, PR * (2.4 + edgeOn * 1.4));
+    lensGlow.addColorStop(0, "rgba(255,220,180,0)");
+    lensGlow.addColorStop(0.4, `rgba(255,160,80,${(0.12 + edgeOn * 0.16) * baseAlpha})`);
+    lensGlow.addColorStop(0.72, `rgba(200,90,90,${(0.06 + edgeOn * 0.08) * baseAlpha})`);
+    lensGlow.addColorStop(1, "rgba(120,40,40,0)");
+    ctx.fillStyle = lensGlow;
+    ctx.beginPath(); ctx.arc(p.x, p.y, PR * (2.4 + edgeOn * 1.4), 0, Math.PI * 2); ctx.fill();
+
+    // 黑洞本体
     ctx.save();
+    ctx.globalAlpha = baseAlpha;
     ctx.beginPath(); ctx.arc(p.x, p.y, PR, 0, Math.PI * 2); ctx.clip();
     if (imgBH.complete && imgBH.naturalWidth > 0) {
       ctx.translate(p.x, p.y);
+      if (isOffline) {
+        ctx.filter = "grayscale(60%) hue-rotate(180deg) brightness(0.75)";
+      }
       ctx.drawImage(imgBH, -PR, -PR, PR * 2, PR * 2);
+      ctx.filter = "none";
     } else {
-      ctx.fillStyle = "#300"; ctx.fillRect(p.x - PR, p.y - PR, PR * 2, PR * 2);
+      ctx.fillStyle = isOffline ? "#001833" : "#300";
+      ctx.fillRect(p.x - PR, p.y - PR, PR * 2, PR * 2);
     }
     ctx.restore();
-    // Edge ring
-    ctx.globalAlpha = 0.6;
-    ctx.strokeStyle = "rgba(255,100,100,0.9)";
+
+    // 边缘光圈
+    ctx.globalAlpha = isOffline ? 0.35 : 0.52;
+    ctx.strokeStyle = isOffline ? "rgba(80,140,255,0.75)" : "rgba(255,100,100,0.9)";
     ctx.lineWidth = Math.max(0.8, PR * 0.07);
+    if (isOffline) {
+      ctx.setLineDash([Math.max(2, PR * 0.18), Math.max(2, PR * 0.12)]);
+    }
     ctx.beginPath(); ctx.arc(p.x, p.y, PR, 0, Math.PI * 2); ctx.stroke();
+    ctx.setLineDash([]);
     ctx.globalAlpha = 1;
-    // Name tag
+
+    // 吸积盘前半圈（覆盖黑洞本体上方）
+    if (edgeOn > 0.04) {
+      drawDiskFlowBands(p.x, p.y, PR, ry, edgeOn, nowMs, {
+        front: true, lensed: true, mirror: false,
+        alphaScale: 0.66, liftScale: 1.34, widthScale: 1.24, stretchX: 1.16, stretchY: 0.42,
+      });
+      drawDiskFlowBands(p.x, p.y, PR, ry, edgeOn, nowMs, {
+        front: true, lensed: true, mirror: true,
+        alphaScale: 0.62, liftScale: 1.42, widthScale: 1.18, stretchX: 1.18, stretchY: 0.4,
+      });
+      drawDiskParticleLayer(p.x, p.y, PR, ry, edgeOn, {
+        front: true, lensed: true, mirror: false,
+        alphaScale: 0.82, stretchX: 1.16, stretchY: 0.44, liftScale: 1.42, widthScale: 1.28,
+      });
+      drawDiskParticleLayer(p.x, p.y, PR, ry, edgeOn, {
+        front: true, lensed: true, mirror: true,
+        alphaScale: 0.76, stretchX: 1.18, stretchY: 0.42, liftScale: 1.5, widthScale: 1.22,
+      });
+    }
+    drawDiskFlowBands(p.x, p.y, PR, ry, edgeOn, nowMs, {
+      front: true, alphaScale: 0.92, widthScale: 1.04, stretchX: 1, stretchY: 1,
+    });
+    drawDiskParticleLayer(p.x, p.y, PR, ry, edgeOn, {
+      front: true, alphaScale: 1, stretchX: 1, stretchY: 1, widthScale: 1.04,
+    });
+
+    // 名称标签
     const nameSize = Math.max(10, Math.min(16, PR * 0.6));
     ctx.font = nameSize + "px 'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif";
     ctx.textAlign = "center";
-    ctx.fillStyle = "rgba(255,200,200,0.9)";
+    ctx.globalAlpha = baseAlpha;
+    ctx.fillStyle = isOffline ? "rgba(140,180,255,0.85)" : "rgba(255,200,200,0.9)";
     ctx.fillText(op.name, p.x, p.y - PR - 8);
-    // Mass label
     ctx.font = (nameSize - 2) + "px 'Segoe UI',sans-serif";
-    ctx.fillStyle = "rgba(255,160,160,0.7)";
+    ctx.fillStyle = isOffline ? "rgba(100,150,255,0.65)" : "rgba(255,160,160,0.7)";
     ctx.fillText(Math.round(op.mass), p.x, p.y - PR - 8 - nameSize);
+    if (isOffline) {
+      ctx.font = Math.max(9, nameSize - 3) + "px 'Segoe UI','PingFang SC',sans-serif";
+      ctx.fillStyle = "rgba(120,160,255,0.75)";
+      ctx.fillText("[离线]", p.x, p.y - PR - 8 - nameSize * 2);
+    }
+    ctx.globalAlpha = 1;
   }
 }
 

@@ -39,9 +39,43 @@
       <p class="hint">WASD / 方向键：移动 | 鼠标按住：引导方向 | Alt + 拖动：环绕黑洞视角 | 滚轮：缩放 | R：重置视角 | Shift 加速</p>
       <div class="hud-actions">
         <button type="button" class="restart-btn" id="restartButton">重新开始</button>
+        <button type="button" class="restart-btn admin-login-btn" id="adminLoginBtn">管理员</button>
       </div>
     </div>
 
+    <!-- 管理员登录弹窗 -->
+    <div class="admin-overlay" id="adminOverlay">
+      <div class="admin-dialog">
+        <div class="admin-header">
+          <span>管理员登录</span>
+          <button type="button" class="admin-close" id="adminCloseLogin">&times;</button>
+        </div>
+        <input type="text" id="adminUser" placeholder="用户名" autocomplete="off" />
+        <input type="password" id="adminPass" placeholder="密码" autocomplete="off" />
+        <button type="button" class="admin-btn" id="adminSubmit">登录</button>
+        <p class="admin-error" id="adminError"></p>
+      </div>
+    </div>
+
+    <!-- 管理员传送面板 -->
+    <div class="admin-panel" id="adminPanel">
+      <div class="admin-header">
+        <span>管理员面板</span>
+        <button type="button" class="admin-close" id="adminLogout" title="登出">&times;</button>
+      </div>
+      <div class="admin-row">
+        <label>X</label>
+        <input type="number" id="tpX" value="0" />
+      </div>
+      <div class="admin-row">
+        <label>Z</label>
+        <input type="number" id="tpZ" value="0" />
+      </div>
+      <button type="button" class="admin-btn" id="tpBtn">传送</button>
+    </div>
+
+    <script src="./gargantua.js"></script>
     <script src="./script.js"></script>
+    <script src="./admin.js"></script>
   </body>
 </html>

@@ -152,6 +152,22 @@
     <!-- 击杀通知 -->
     <div id="killFeed" class="kill-feed"></div>
 
+    <!-- 管理员传送面板 -->
+    <div id="adminPanel" class="admin-panel" style="display:none;">
+      <div class="admin-header">管理员传送</div>
+      <div class="admin-body">
+        <div class="admin-row">
+          <label for="teleportX">X</label>
+          <input type="number" id="teleportX" placeholder="0" />
+        </div>
+        <div class="admin-row">
+          <label for="teleportZ">Z</label>
+          <input type="number" id="teleportZ" placeholder="0" />
+        </div>
+        <button type="button" id="teleportBtn" class="admin-teleport-btn">传送</button>
+      </div>
+    </div>
+
     <script src="/script.js"></script>
     <script src="/multiplayer.js"></script>
   </body>

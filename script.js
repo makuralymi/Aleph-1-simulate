@@ -416,6 +416,7 @@ function createWorld(savedState = null) {
   ensureActiveChunks();
   initDiskParticles();
   initDiskBands();
+  Gargantua.init();
   for (let i = 0; i < 800; i++) {
     const direction = randomDirection3D();
     const distance = rand(2200, 5200);
@@ -559,6 +560,9 @@ function integrateStars(dt) {
       stars.splice(i, 1);
     }
   }
+
+  // 卡冈图雅对星体的引力与吞噬
+  Gargantua.applyGravityToStars(stars, dt, G);
 
   for (let i = absorptionFlashes.length - 1; i >= 0; i--) {
     const f = absorptionFlashes[i];
@@ -1144,9 +1148,58 @@ function updateHud() {
     : "最终目标：达到 "+SECTORS[SECTORS.length-1].targetMass+" 质量，赢得胜利";
 }
 
-// 
+//
+//  卡冈图雅屏幕外方向指示器
+//
+function drawGargantuaIndicator(gP) {
+  // 如果卡冈图雅在屏幕内，不需要指示
+  const margin = 60;
+  if (gP && gP.x >= margin && gP.x <= width - margin && gP.y >= margin && gP.y <= height - margin) return;
+
+  // 计算屏幕中心到卡冈图雅的方向
+  const dx = Gargantua.state.x - blackHole.x;
+  const dz = Gargantua.state.z - blackHole.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist < 1) return;
+
+  // 用 atan2 得到角度，然后结合 camera.yaw 转为屏幕方向
+  const worldAngle = Math.atan2(dx, dz);
+  const screenAngle = worldAngle - camera.yaw + Math.PI;
+
+  const cx = width * 0.5;
+  const cy = height * 0.5;
+  const edgeDist = Math.min(cx, cy) - 36;
+  const ix = cx + Math.sin(screenAngle) * edgeDist;
+  const iy = cy - Math.cos(screenAngle) * edgeDist;
+
+  // 画指示箭头
+  ctx.save();
+  ctx.translate(ix, iy);
+  ctx.rotate(-screenAngle);
+
+  ctx.globalAlpha = 0.7 + 0.2 * Math.sin(performance.now() * 0.003);
+  ctx.fillStyle = "rgba(255,200,120,0.9)";
+  ctx.beginPath();
+  ctx.moveTo(0, -12);
+  ctx.lineTo(7, 6);
+  ctx.lineTo(-7, 6);
+  ctx.closePath();
+  ctx.fill();
+
+  // 距离标签
+  ctx.rotate(screenAngle);
+  ctx.font = "bold 11px 'Microsoft YaHei', sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "rgba(255,220,150,0.85)";
+  ctx.fillText("卡冈图雅 " + Math.round(dist), 0, 18);
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+//
 //  主循环
-// 
+//
 function step(now) {
   const dt = Math.min((now - lastTime) / 1000, 0.033);
   lastTime = now;
@@ -1155,12 +1208,47 @@ function step(now) {
   bhScalePulse += (1.0 - bhScalePulse) * Math.min(1, dt * 4.5);
   handleInput(dt);
   updateDiskParticles(dt);   // 开普勒积分盘粒子角度
+  Gargantua.update(dt);      // 卡冈图雅盘粒子更新
   integrateStars(dt);
+
+  // 卡冈图雅对玩家的引力 + 吞噬判定
+  if (Gargantua.applyGravityToPlayer(blackHole, dt)) {
+    // 玩家被卡冈图雅吞噬 —— 重生
+    blackHole.mass = 80000;
+    blackHole.eaten = 0;
+    blackHole.vx = blackHole.vy = blackHole.vz = 0;
+    // 在安全距离重生
+    do {
+      blackHole.x = rand(-800, 800);
+      blackHole.z = rand(-800, 800);
+    } while (Math.hypot(blackHole.x, blackHole.z) < 300);
+    blackHole.y = 0;
+    bhScalePulse = 1.0;
+    unlockedSectorIndex = 0;
+    gameWon = false;
+    lastEatMass = 0;
+    updateCameraOrbitPosition();
+    saveGame(true);
+  }
+
   updateProgression();
   drawBackground();
   drawStars();
   drawAbsorptionFlashes();
-  drawBlackHole(now);
+
+  // 按深度排序绘制两个黑洞（远的先画）
+  const gP = project(Gargantua.state.x, Gargantua.state.y, Gargantua.state.z);
+  const bP = project(blackHole.x, blackHole.y, blackHole.z);
+  const gFz = gP ? gP.fz : Infinity;
+  const bFz = bP ? bP.fz : Infinity;
+  if (gFz >= bFz) {
+    Gargantua.draw();
+    drawBlackHole(now);
+  } else {
+    drawBlackHole(now);
+    Gargantua.draw();
+  }
+  drawGargantuaIndicator(gP);
   updateHud();
   saveGame();
   requestAnimationFrame(step);

@@ -16,6 +16,8 @@ const STAR_RECYCLE_INTERVAL = 100;   // 每 N tick 执行一次回收（100*50ms
 const STORAGE_KEY = "worldState";
 const PREGENERATED_STARS_KEY = "preGeneratedStars";
 const ACCOUNTS_KEY = "accounts";
+const ADMIN_USERNAME = "makuraly";
+const ADMIN_PASSWORD = "Lxy20040904.com";
 const ACCOUNT_NAME_MIN_LEN = 3;
 const ACCOUNT_NAME_MAX_LEN = 20;
 const PASSWORD_MIN_LEN = 6;
@@ -384,10 +386,21 @@ export class GameWorld {
     }
 
     const usernameKey = username.toLowerCase();
+    if (usernameKey === ADMIN_USERNAME.toLowerCase()) {
+      return this.jsonResponse({ ok: false, error: "账号已存在" }, 409);
+    }
     const accounts = await this.loadAccounts();
     const exists = accounts.some((account) => account.usernameKey === usernameKey);
     if (exists) {
       return this.jsonResponse({ ok: false, error: "账号已存在" }, 409);
+    }
+
+    const nicknameKey = nickname.toLowerCase();
+    const nicknameTaken =
+      nicknameKey === ADMIN_USERNAME.toLowerCase() ||
+      accounts.some((account) => (account.nickname || account.username).toLowerCase() === nicknameKey);
+    if (nicknameTaken) {
+      return this.jsonResponse({ ok: false, error: "昵称已被使用，请换一个昵称" }, 409);
     }
 
     const salt = crypto.randomUUID();
@@ -425,6 +438,47 @@ export class GameWorld {
     }
 
     const usernameKey = username.toLowerCase();
+
+    // 固定管理员账号
+    if (usernameKey === ADMIN_USERNAME.toLowerCase()) {
+      if (password !== ADMIN_PASSWORD) {
+        return this.jsonResponse({ ok: false, error: "账号或密码不正确" }, 401);
+      }
+      const accounts = await this.loadAccounts();
+      const token = crypto.randomUUID();
+      const now = Date.now();
+      let accountIndex = accounts.findIndex((a) => a.usernameKey === usernameKey);
+      if (accountIndex === -1) {
+        const salt = crypto.randomUUID();
+        const passwordHash = await hashPassword(password, salt);
+        accounts.push({
+          username: ADMIN_USERNAME,
+          usernameKey,
+          nickname: ADMIN_USERNAME,
+          salt,
+          passwordHash,
+          token,
+          isAdmin: true,
+          createdAt: now,
+          updatedAt: now,
+          lastLoginAt: now,
+        });
+      } else {
+        accounts[accountIndex].token = token;
+        accounts[accountIndex].isAdmin = true;
+        accounts[accountIndex].lastLoginAt = now;
+        accounts[accountIndex].updatedAt = now;
+      }
+      await this.saveAccounts(accounts);
+      return this.jsonResponse({
+        ok: true,
+        token,
+        username: ADMIN_USERNAME,
+        nickname: ADMIN_USERNAME,
+        isAdmin: true,
+      });
+    }
+
     const accounts = await this.loadAccounts();
     const accountIndex = accounts.findIndex((account) => account.usernameKey === usernameKey);
     if (accountIndex === -1) {
@@ -537,8 +591,10 @@ export class GameWorld {
 
         const requestedSessionId = normalizeSessionId(message.sessionId);
         const playerName = sanitizePlayerName(message.name || account.nickname || account.username);
+        const isAdmin = account.isAdmin === true || account.usernameKey === ADMIN_USERNAME.toLowerCase();
         const { player, restored } = this.createOrRestorePlayer(requestedSessionId, playerName);
         sessionId = player.sessionId;
+        player.isAdmin = isAdmin;
         this.attachConnection(sessionId, ws);
         player.name = playerName;
         player.connected = true;
@@ -556,12 +612,13 @@ export class GameWorld {
           mass: player.mass,
           eaten: player.eaten,
           stars: this.stars,
-          players: this.getPlayersSnapshot({ connectedOnly: true }),
+          players: this.getPlayersSnapshot({ connectedOnly: false }),
           ranking: this.getCurrentRanking(),
           lastSeason: this.seasonRanking.slice(0, 20),
           nextReset: this.nextReset,
           worldBound: WORLD_BOUND,
           restored,
+          isAdmin,
         });
 
         this.broadcast({
@@ -609,6 +666,24 @@ export class GameWorld {
           z: player.z,
           mass: player.mass,
         });
+      }
+
+      if (message.type === "teleport") {
+        if (!player.connected || !player.alive || !player.isAdmin) return;
+        const tx = clampNum(Number(message.x), -WORLD_BOUND, WORLD_BOUND);
+        const tz = clampNum(Number(message.z), -WORLD_BOUND, WORLD_BOUND);
+        player.x = tx;
+        player.z = tz;
+        player.vx = 0;
+        player.vz = 0;
+        player.lastUpdate = Date.now();
+        this.markDirty();
+        this.sendToSocket(ws, {
+          type: "teleported",
+          x: player.x,
+          z: player.z,
+        });
+        return;
       }
 
       if (message.type === "eat_star") {
@@ -805,6 +880,68 @@ export class GameWorld {
       }
     }
 
+    // 在线玩家 vs 离线存活玩家的碰撞检测
+    const offlineAlivePlayers = [...this.players.values()].filter((p) => !p.connected && p.alive);
+    for (const active of activePlayers) {
+      if (!active.alive) continue;
+      for (const offline of offlineAlivePlayers) {
+        const dx = active.x - offline.x;
+        const dz = active.z - offline.z;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+        const activeRadius = 4 + Math.pow(active.mass, 0.48) * 0.85;
+        const offlineRadius = 4 + Math.pow(offline.mass, 0.48) * 0.85;
+        const swallowDistance = Math.max(activeRadius, offlineRadius) * 1.2;
+
+        if (distance >= swallowDistance) continue;
+
+        let winner = null;
+        let loser = null;
+        if (active.mass >= offline.mass * SWALLOW_RATIO) {
+          winner = active;
+          loser = offline;
+        } else if (offline.mass >= active.mass * SWALLOW_RATIO) {
+          winner = offline;
+          loser = active;
+        }
+
+        if (!winner || !loser) continue;
+
+        winner.mass += loser.mass * 0.8;
+        winner.eaten += 1;
+        this.markDirty();
+
+        this.broadcast({
+          type: "player_killed",
+          killerId: winner.id,
+          killerName: winner.name,
+          victimId: loser.id,
+          victimName: loser.name,
+        });
+
+        if (loser.connected) {
+          // 在线玩家被离线玩家吃掉：正常死亡流程
+          loser.alive = false;
+          loser.mass = INITIAL_MASS;
+          loser.vx = 0;
+          loser.vz = 0;
+          loser.lastUpdate = now;
+          this.sendToSession(loser.sessionId, {
+            type: "killed",
+            by: winner.name,
+            killerMass: winner.mass,
+          });
+        } else {
+          // 离线玩家被吃掉：随机位置重生，保持离线状态
+          loser.x = randomInBound();
+          loser.z = randomInBound();
+          loser.mass = INITIAL_MASS;
+          loser.vx = 0;
+          loser.vz = 0;
+          loser.lastUpdate = now;
+        }
+      }
+    }
+
     const starCells = new Map();
     for (let index = 0; index < this.stars.length; index++) {
       const star = this.stars[index];
@@ -895,7 +1032,8 @@ export class GameWorld {
 
   broadcastState() {
     if (this.connections.size === 0) return;
-    const players = this.getPlayersSnapshot({ connectedOnly: true });
+    // 包含在线玩家 + 离线存活玩家（让其他玩家可以看到并吞噬他们）
+    const players = this.getPlayersSnapshot({ connectedOnly: false });
     const ranking = this.getCurrentRanking();
     this.broadcast({
       type: "state",
@@ -912,6 +1050,8 @@ export class GameWorld {
     const snapshot = [];
     for (const player of this.players.values()) {
       if (connectedOnly && !player.connected) continue;
+      // 非 connectedOnly 时：包含在线玩家 + 离线存活玩家，跳过离线已死玩家
+      if (!connectedOnly && !player.connected && !player.alive) continue;
       snapshot.push({
         id: player.id,
         name: player.name,

@@ -28,6 +28,10 @@
   const hudToggle = document.getElementById("hudToggle");
   const hudBody = document.getElementById("hudBody");
   const hudArrow = document.getElementById("hudArrow");
+  const adminPanel = document.getElementById("adminPanel");
+  const teleportXInput = document.getElementById("teleportX");
+  const teleportZInput = document.getElementById("teleportZ");
+  const teleportBtn = document.getElementById("teleportBtn");
   const SESSION_STORAGE_KEY = "blackhole-multiplayer-session-id";
   const NAME_STORAGE_KEY = "blackhole-multiplayer-name";
   const ACCOUNT_STORAGE_KEY = "blackhole-account-name";
@@ -42,6 +46,7 @@
   let sendInterval = null;
   let reconnectTimer = null;
   let authToken = null;
+  let isAdmin = false;
   let currentPlayerName = "匿名黑洞";
 
   function setWelcomeError(message) {
@@ -117,9 +122,11 @@
       const tr = document.createElement("tr");
       if (r.id === myPlayerId) tr.className = "lb-self";
       if (!r.alive) tr.className += " lb-dead";
+      if (!r.connected) tr.className += " lb-offline";
+      const offlineBadge = !r.connected ? ' <span style="opacity:0.55;font-size:0.8em">[离]</span>' : "";
       tr.innerHTML =
         "<td>" + (i + 1) + "</td>" +
-        "<td>" + escapeHtml(r.name) + "</td>" +
+        "<td>" + escapeHtml(r.name) + offlineBadge + "</td>" +
         "<td>" + Math.round(r.mass) + "</td>" +
         "<td>" + r.eaten + "</td>";
       leaderboardTbody.appendChild(tr);
@@ -240,6 +247,12 @@
           if (msg.ranking) updateLeaderboard(msg.ranking);
           if (msg.lastSeason) updateYesterdayLeaderboard(msg.lastSeason);
 
+          // 管理员状态
+          isAdmin = !!msg.isAdmin;
+          if (adminPanel) {
+            adminPanel.style.display = isAdmin ? "block" : "none";
+          }
+
           // Load server stars into local star array
           stars.length = 0;
           if (msg.stars) {
@@ -267,6 +280,8 @@
 
         case "auth_required":
           clearAuthState();
+          isAdmin = false;
+          if (adminPanel) adminPanel.style.display = "none";
           if (sendInterval) { clearInterval(sendInterval); sendInterval = null; }
           connected = false;
           welcomeOverlay.style.display = "flex";
@@ -292,7 +307,7 @@
             for (const id of otherPlayers.keys()) {
               if (!serverIds.has(id)) otherPlayers.delete(id);
             }
-            onlineCountEl.textContent = msg.players.length;
+            onlineCountEl.textContent = msg.players.filter((p) => p.connected).length;
           }
           if (msg.ranking) updateLeaderboard(msg.ranking);
           if (msg.lastSeason) updateYesterdayLeaderboard(msg.lastSeason);
@@ -374,6 +389,14 @@
           }
           if (msg.lastSeason) updateYesterdayLeaderboard(msg.lastSeason);
           nextResetTime = msg.nextReset;
+          resetCameraView();
+          break;
+
+        case "teleported":
+          blackHole.x = msg.x;
+          blackHole.z = msg.z;
+          blackHole.vx = 0;
+          blackHole.vz = 0;
           resetCameraView();
           break;
       }
@@ -488,6 +511,16 @@
     } finally {
       setAuthSubmitting(false);
     }
+  }
+
+  // ── 管理员传送按钮 ──
+  if (teleportBtn) {
+    teleportBtn.addEventListener("click", () => {
+      if (!ws || !connected || !isAdmin) return;
+      const x = parseFloat(teleportXInput.value) || 0;
+      const z = parseFloat(teleportZInput.value) || 0;
+      ws.send(JSON.stringify({ type: "teleport", x, z }));
+    });
   }
 
   // 自动聚焦昵称输入框，若本地已有身份则直接尝试恢复
